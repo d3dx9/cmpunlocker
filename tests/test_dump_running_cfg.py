@@ -76,8 +76,47 @@ def test_find_first_a100_resource0_returns_none_when_no_sys():
 def test_read_u32_decodes_little_endian(fake_sysfs):
     _, res0_path, fixtures = fake_sysfs
     for off, expected in fixtures.items():
-        got = dump_running_cfg.read_u32(str(res0_path), off)
+        got, ok = dump_running_cfg.read_u32(str(res0_path), off)
+        assert ok, f'at 0x{off:x}: read_u32 reported not-ok'
         assert got == expected, f'at 0x{off:x}: got 0x{got:x}, expected 0x{expected:x}'
+
+
+def test_read_u32_returns_not_ok_on_eio(fake_sysfs, monkeypatch):
+    """A short read reports ok=False; the calling loop should skip it."""
+    _, res0_path, _ = fake_sysfs
+
+    real_open = dump_running_cfg.os.open
+    real_lseek = dump_running_cfg.os.lseek
+    real_read = dump_running_cfg.os.read
+
+    monkeypatch.setattr(dump_running_cfg.os, 'open', real_open)
+    monkeypatch.setattr(dump_running_cfg.os, 'lseek', real_lseek)
+
+    def short_read(fd, n):
+        return b'\x01\x02'  # only 2 bytes — short read
+    monkeypatch.setattr(dump_running_cfg.os, 'read', short_read)
+
+    val, ok = dump_running_cfg.read_u32(str(res0_path), 0x100)
+    assert ok is False
+    assert val is None
+
+
+def test_read_u32_swallows_oserror(fake_sysfs, monkeypatch):
+    """``OSError`` (e.g. EIO from unmapped BAR pages) is reported as not-ok."""
+    _, res0_path, _ = fake_sysfs
+
+    real_open = dump_running_cfg.os.open
+    real_lseek = dump_running_cfg.os.lseek
+
+    monkeypatch.setattr(dump_running_cfg.os, 'open', real_open)
+    monkeypatch.setattr(dump_running_cfg.os, 'lseek', real_lseek)
+    def raise_eio(fd, n):
+        raise OSError(5, 'Input/output error')
+    monkeypatch.setattr(dump_running_cfg.os, 'read', raise_eio)
+
+    val, ok = dump_running_cfg.read_u32(str(res0_path), 0x100000)
+    assert ok is False
+    assert val is None
 
 
 def test_read_u32_uses_seek_not_full_read(fake_sysfs, monkeypatch):
@@ -106,7 +145,6 @@ def test_read_u32_uses_seek_not_full_read(fake_sysfs, monkeypatch):
     monkeypatch.setattr(dump_running_cfg.os, 'read', spy_read)
 
     dump_running_cfg.read_u32(str(res0_path), 0x120048)
-    # lseek called with offset=0x120048, then read 4 bytes
     seek_calls = [c for c in captured if isinstance(c, tuple) and c[0] == 'seek']
     assert seek_calls, 'lseek was never called'
     assert seek_calls[-1][2] == 0x120048

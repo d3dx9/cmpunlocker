@@ -52,15 +52,24 @@ def find_first_a100_resource0() -> Optional[str]:
     return None
 
 
-def read_u32(path: str, offset: int) -> int:
-    """Read a 32-bit little-endian register at ``offset`` from ``path``."""
+def read_u32(path: str, offset: int):
+    """Read a 32-bit little-endian register at ``offset`` from ``path``.
+
+    Returns ``(value, ok)``: ``ok=False`` means the read returned EIO
+    (BAR0 region not mapped by the kernel for userspace access — the
+    device is listed under sysfs but not actually backed). On a
+    containerised A100 without PCIe passthrough this is the expected
+    outcome for addresses past the mapped region.
+    """
     fd = os.open(path, os.O_RDONLY)
     try:
         os.lseek(fd, offset, os.SEEK_SET)
         data = os.read(fd, 4)
         if len(data) != 4:
-            raise OSError(f'short read ({len(data)} bytes) at offset 0x{offset:x}')
-        return struct.unpack('<I', data)[0]
+            return None, False
+        return struct.unpack('<I', data)[0], True
+    except OSError:
+        return None, False
     finally:
         os.close(fd)
 
@@ -127,6 +136,14 @@ def main(argv=None):
     p = argparse.ArgumentParser(
         prog='dump_running_cfg',
         description='Read FB-controller registers from a running A100',
+        epilog=(
+            'Note on PCI passthrough: this tool needs /sys/bus/pci/.../resource0\n'
+            'with the BAR memory actually mapped into the kernel\'s user-visible\n'
+            'address space. Containers that expose the PCI device through sysfs\n'
+            'but back it with virtualised / partially-mapped BAR will report\n'
+            'EIO on read; that outcome means the host path is missing the device,\n'
+            'not that the tool has a bug. See tools/dump_running_cfg.py for hints.'
+        ),
     )
     p.add_argument('--bdf', default=None,
                    help='PCI BDF (e.g. 0000:01:00.0); auto-detect if omitted')
@@ -162,16 +179,30 @@ def main(argv=None):
     print(f'=== live BAR0 dump, GPU={bdf}, family={args.family} '
           f'(nvidia-smi memory.total={total_mib} MiB) ===')
     results = []
+    fail_count = 0
+    fail_first = None
+    fail_last = None
     for addr in addrs:
-        try:
-            val = read_u32(path, addr)
-        except OSError as exc:
-            sys.stderr.write(f'  read fail at 0x{addr:x}: {exc}\n')
+        val, ok = read_u32(path, addr)
+        if not ok:
+            fail_count += 1
+            if fail_first is None:
+                fail_first = addr
+            fail_last = addr
             continue
         results.append((addr, val, ''))
 
     if not results:
-        sys.stderr.write('no registers read successfully\n')
+        sys.stderr.write(
+            f'no registers read successfully out of {len(addrs)} attempts '
+            f'(BAR0 region probably not mapped for userspace access).\n')
+        if fail_first is not None:
+            sys.stderr.write(
+                f'  first failure at offset 0x{fail_first:x}'
+                f'{"  (one of " + str(fail_count) + " consecutive failures) "
+                 if fail_count > 1 else ""}\n')
+        sys.stderr.write(
+            '  → see the "/sys PCI passthrough" note below\n')
         return 1
 
     by_addr = {}
@@ -180,11 +211,22 @@ def main(argv=None):
             if lo <= addr < hi:
                 by_addr[addr] = val
 
+    print(f'  read ok={len(by_addr)}, read fail={fail_count} '
+          f'(out of {len(addrs)})')
     for addr in sorted(by_addr):
         in_cfg1 = addr in CFG1_CANDIDATES
         in_lmr = addr in LMR_CANDIDATES
         marker = ' (CFG1 candidate)' if in_cfg1 else (' (LMR candidate)' if in_lmr else '')
         print(f'  +0x{addr:06x} = 0x{by_addr[addr]:08x}{marker}')
+
+    if fail_count:
+        first = fail_first if fail_first is not None else 0
+        last = fail_last if fail_last is not None else 0
+        sys.stderr.write(
+            f'  note: read failed continuously from 0x{first:x} to 0x{last:x} '
+            f'— the kernel only maps part of the resource0 file as '
+            f'real BAR memory; the unmapped region above the device\'s '
+            f'actual BAR size returns EIO.\n')
 
     if not args.no_yaml:
         print()
