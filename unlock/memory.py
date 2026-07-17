@@ -127,7 +127,8 @@ def try_memory_unlock_candidates(pci_full: str) -> dict:
     # If driver is unloaded, try to reload so nvidia-smi can report memory size.
     # This is required for the probe to actually validate a candidate worked.
     try:
-        subprocess.run(['modprobe', 'nvidia'], capture_output=True, timeout=10)
+        subprocess.run(['modprobe', 'nvidia'], capture_output=True, timeout=10,
+                        check=False)
         import time as _time
         _time.sleep(3)
     except Exception:
@@ -164,8 +165,10 @@ def try_memory_unlock_candidates(pci_full: str) -> dict:
         _ok, _before, _after, mem_mib = try_candidate(
                 pci_full, addr, value, attempts)
         if mem_mib and baseline_mib and mem_mib != baseline_mib:
-            log.warning("[%s] >>> MEMORY SIZE CHANGED: %s -> %s MiB (addr=0x%x, value=0x%x, %s) <<<",
-                        pci_full, baseline_mib, mem_mib, addr, value, label)
+            log.warning(
+                "[%s] >>> MEMORY SIZE CHANGED: %s -> %s MiB "
+                "(addr=0x%x, value=0x%x, %s) <<<",
+                pci_full, baseline_mib, mem_mib, addr, value, label)
             return {
                 'baseline_mib': baseline_mib,
                 'success': (addr, value, label, mem_mib),
