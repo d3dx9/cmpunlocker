@@ -119,7 +119,8 @@ def collect_addresses(family):
         return [a for lo, hi, _ in FAMILY_A_RANGES for a in range(lo, hi, 4)]
     if family == 'b':
         return [a for lo, hi, _ in FAMILY_B_RANGES for a in range(lo, hi, 4)]
-    return [a for lo, hi in (FAMILY_A_RANGES + FAMILY_B_RANGES) for a in range(lo, hi, 4)]
+    ranges = FAMILY_A_RANGES + FAMILY_B_RANGES
+    return [a for lo, hi, _ in ranges for a in range(lo, hi, 4)]
 
 
 def main(argv=None):
