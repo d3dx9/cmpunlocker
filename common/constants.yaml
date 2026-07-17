@@ -6,6 +6,15 @@ dmem_layout:
   bar0_mmap_size: 0x1000000
 
 host_bar0_writes:
+  feat_ovr_plm:
+    addr:  0x8403C4
+    value: 0x000000FF
+    note: >
+      Same register as resetPLM. The 0x810D -> 0x8119 ROP exit change
+      causes secure_teardown to run during patched-firmware boot, which
+      sets this register to 0xFF (= "PLM open"). The brief's earlier hint
+      of 0x00FF0000 was wrong; the actual booter-set value is 0x000000FF
+      (observed on 580.159.03 at 0000:01:00.0).
   ss0:
     addr:  0x0082381C
     value: 0x88888888
@@ -14,9 +23,168 @@ host_bar0_writes:
     addr:  0x00823820
     value: 0x00000008
     note: "FEAT_OVR_SM_SPD_1 (IMLA4 override)"
+  fb_geometry:
+    note: >
+      MEMORY UNLOCK — addresses discovered 2026-07-17 via RISC-V disassembly
+      of .ga100_text and live BAR0 reads on 580.159.03.
+
+      Family A — booter init (DRAM timing/refresh) — written by
+      .ga100_text+0x019c-0x01c0 to 0x300000xxx (mapped to 0x110xxx in BAR0):
+        0x110604 = 0x114  (matches ADDI 276 + SW)
+        0x110608 = 0x05   (matches ADDI 5   + SW)
+        0x110624 = 0x190  (boots at 0x90, driver raised bit 8)
+        0x110628 = 0x1400
+        0x11062c = 0x80000064
+        0x110630 = 0xa2086560
+        0x110684 = 0x01
+        0x11126c = 0x00  (driver cleared boot value 1)
+
+      Family B — RM register-table (FB geometry / LMR side) — found in
+      .section_task_rm_elf_rodata_instance at file 0x214000 as (storage_ptr,
+      register_addr) pairs, and a separate 13-entry register-address list at
+      0x214098. Live BAR0 readings on 580.159.03 at 0000:01:00.0:
+        0x120048 = 0x53
+        0x12004c = 0x00
+        0x120050 = 0x01
+        0x120054 = 0xBADF5040  (NVIDIA debug-marker scratch)
+        0x120058 = 0x00
+        0x12005c = 0x00
+        0x120060 = 0x00
+        0x120064 = 0xCE6
+        0x12006c = 0x10
+        0x120070 = 0x100001
+        0x120074 = 0x08
+        0x120078 = 0x05
+        0x122120 = 0x00
+        0x122128 = 0x00
+        0x122200 = 0x00
+        0x122204 = 0x02
+
+      80 GB override values are NOT in this firmware binary — the booter
+      writes 10 GB boot values and the RM table values are fuse/runtime
+      derived. To complete the unlock, the 80 GB values for cfg1/lmr must
+      come from external sources (paper §6.3, the Discord CFG1+LMR
+      discussion, or empirical tuning). apply_memory_unlock() refuses to
+      run if cfg1 is null.
+    cfg1:
+      addr:  null
+      value: null
+      note: "TODO — CFG1 register (Family B). Likely 0x120048 or 0x122204. 80GB value TBD."
+    lmr:
+      addr:  null
+      value: null
+      note: "TODO — LMR register (Family B). Likely 0x122120, 0x122128, 0x122200, or 0x122204. 80GB value TBD."
+    refresh_interval:
+      addr:  0x110624
+      value: null
+      note: >
+        Family A. Booter writes 0x90, driver later raises to 0x190 (bit 8).
+        Paper §6.3 says "lowering the refresh-interval field" of an FB-config
+        register helps 80 GB stability. Exact 80 GB-stability value not in paper.
+    fb_geometry_table:
+      note: >
+        Family B — discovered 2026-07-17 in
+        .section_task_rm_elf_rodata_instance at file 0x214098. 13 register
+        addresses (0x120xxx, 0x122xxx) plus storage-pointer pairs at 0x214000.
+        These are persistent across FLR — reads return same values before and
+        after driver reload. Likely the CFG1/LMR candidates. 80 GB override
+        values must come from external sources.
+      reg_0x120048:
+        addr:  0x120048
+        live:  0x00000053
+        note: "Family B, smallest address. Could be CFG1 or refresh-interval field."
+      reg_0x12004c:
+        addr:  0x12004c
+        live:  0x00000000
+        note: "Family B."
+      reg_0x120050:
+        addr:  0x120050
+        live:  0x00000001
+        note: "Family B."
+      reg_0x120054:
+        addr:  0x120054
+        live:  0xBADF5040
+        note: "Family B. Debug-marker scratch (NVIDIA convention)."
+      reg_0x120058:
+        addr:  0x120058
+        live:  0x00000000
+      reg_0x12005c:
+        addr:  0x12005c
+        live:  0x00000000
+      reg_0x120060:
+        addr:  0x120060
+        live:  0x00000000
+      reg_0x120064:
+        addr:  0x120064
+        live:  0x000000CE6
+        note: "Family B. Non-trivial value (3302)."
+      reg_0x12006c:
+        addr:  0x12006c
+        live:  0x00000010
+      reg_0x120070:
+        addr:  0x120070
+        live:  0x00100001
+      reg_0x120074:
+        addr:  0x120074
+        live:  0x00000008
+      reg_0x120078:
+        addr:  0x120078
+        live:  0x00000005
+      reg_0x122120:
+        addr:  0x122120
+        live:  0x00000000
+      reg_0x122128:
+        addr:  0x122128
+        live:  0x00000000
+      reg_0x122200:
+        addr:  0x122200
+        live:  0x00000000
+      reg_0x122204:
+        addr:  0x122204
+        live:  0x00000002
+    cfg2_candidate:
+      addr:  0x110604
+      value: null
+      note: "Family A. Booter writes 0x114, driver leaves at 0x114."
+    cfg3_candidate:
+      addr:  0x110608
+      value: null
+      note: "Family A. Booter writes 0x05, driver leaves at 0x05."
+    cfg4_candidate:
+      addr:  0x110628
+      value: null
+      note: "Driver writes 0x1400."
+    cfg5_candidate:
+      addr:  0x11062c
+      value: null
+      note: "Driver writes 0x80000064."
+    cfg6_candidate:
+      addr:  0x110630
+      value: null
+      note: "Driver writes 0xa2086560."
 
 booter_addrs:
   bar0_write_gadget: 0x10B9
+  tail_exit_default:   0x0000810D
+  tail_exit_secure_teardown: 0x00008119
+  note: >
+    tail_exit_* addresses are offsets into the booter ROM IMEM. These were
+    derived from disassembly of the 580.x GSP firmware. They MUST be reverified
+    against the booter ROM embedded in /lib/firmware/nvidia/<ver>/gsp_tu10x.bin
+    whenever the driver/firmware version changes — different GSP builds ship
+    different booter images and the offsets shift.
+
+payload_registers:
+  mailbox_diagnostic:
+    addr:  0x00001000
+    value: 0xDEADBEEF
+    note: >
+      Diagnostic scratch register written by the ROP chain as the last step.
+      After FLR, read this address via BAR0 to confirm the chain actually
+      executed to completion. Address 0x1000 is the standard GSP DMEM scratch
+      word used by NVIDIA's own booter for transient flags — if it turns out
+      to be wrong for this firmware, change the addr only; the value 0xDEADBEEF
+      is intentionally distinctive so a successful write is unambiguous.
 
 payload_frames:
   frame_start_addr: 0xFF48

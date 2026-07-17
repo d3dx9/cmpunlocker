@@ -5,10 +5,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from common.constants import get
 
+MAILBOX_REG = get('payload_registers.mailbox_diagnostic.addr')
+MAILBOX_VALUE = get('payload_registers.mailbox_diagnostic.value')
+
 WRITES = [
     (0x009A0204, 0x02779000),
     (0x00100CE0, 0x0000020B),
     (0x00823804, 0xFFFFFFFF),
+    (MAILBOX_REG, MAILBOX_VALUE),
 ]
 
 
@@ -20,7 +24,7 @@ def build() -> bytes:
     frame_start = get('payload_frames.frame_start_addr')
     frame_stride = get('payload_frames.frame_stride')
     gadget_addr = get('booter_addrs.bar0_write_gadget')
-    tail_return = 0x0000810D
+    tail_return = get('booter_addrs.tail_exit_secure_teardown')
 
     payload = bytearray(payload_size)
 
