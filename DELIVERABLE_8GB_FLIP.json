@@ -1,0 +1,37 @@
+{"action": "8GB_flip_test_on_A100_or_CMP_170HX",
+ "purpose": "Validate which of the 14 A100 80GB register values is the actual cfg1/lmr field that controls memory size",
+ "target_machines": ["any machine with root on the A100 PCIe 80GB (104.156.136.240) OR any machine with root on the CMP 170HX (the one the user has physically)"],
+ "preflight_needed": "Run dump_running_cfg + bar0_sanity_check first to confirm BAR0 access works",
+ "test_logic": {
+  "for_each_candidate in": [
+    {"addr": "0x12006c", "current_A100_80GB": "0x14", "expected_10GB_value_to_write": "0x10", "delta": 4, "rationale": "low-byte bit toggle; most likely size field"},
+    {"addr": "0x120074", "current_A100_80GB": "0x0a", "expected_10GB_value_to_write": "0x08", "delta": 2},
+    {"addr": "0x120078", "current_A100_80GB": "0x07", "expected_10GB_value_to_write": "0x05", "delta": 2},
+    {"addr": "0x120040", "current_A100_80GB": "0x72", "expected_10GB_value_to_write": "0x00", "delta": 0x72},
+    {"addr": "0x120044", "current_A100_80GB": "0x12", "expected_10GB_value_to_write": "0x00", "delta": 0x12},
+    {"addr": "0x122134", "current_A100_80GB": "0x2811972", "expected_10GB_value_to_write": "0x00", "delta": 0x2811972, "rationale": "big HBM value, probably timing/training"},
+    {"addr": "0x122138", "current_A100_80GB": "0xc7151015", "expected_10GB_value_to_write": "0x00"},
+    {"addr": "0x12213c", "current_A100_80GB": "0x2224", "expected_10GB_value_to_write": "0x00"},
+    {"addr": "0x12214c", "current_A100_80GB": "0x170000a1", "expected_10GB_value_to_write": "0x00"},
+    {"addr": "0x1221f0", "current_A100_80GB": "0x3c000", "expected_10GB_value_to_write": "0x00"},
+    {"addr": "0x122008", "current_A100_80GB": "0x10a", "expected_10GB_value_to_write": "0x00"},
+    {"addr": "0x122004", "current_A100_80GB": "1", "expected_10GB_value_to_write": "0x00"},
+    {"addr": "0x12204c", "current_A100_80GB": "1", "expected_10GB_value_to_write": "0x00"},
+    {"addr": "0x122050", "current_A100_80GB": "0xffffff8f", "expected_10GB_value_to_write": "0x00"}
+  ]
+ },
+ "command_template": {
+  "preflight_a100": [
+    "sudo python3 -m tools.dump_running_cfg --bdf 0000:01:00.0 --family b",
+    "sudo python3 -m tools.bar0_sanity_check --bdf 0000:01:00.0 --addr 0x12006c"
+  ],
+  "flip_test": "# On A100 with root (DESTRUCTIVE if wrong): for each candidate above, write the 10GB value, sleep 1, check nvidia-smi memory.total; if it drops from 81920 to 8192 MiB we found the cfg1. Write the 80GB value back to restore."
+ },
+ "validation": "If the 8GB flip works on the A100, we have ground truth for cfg1. Apply the 80GB cfg1 value to the CMP 170HX via the cmpunlocker payload pipeline (root on CMP required).",
+ "risk_notes": [
+  "If wrong value is written to wrong register, A100 might hang or crash (recoverable by host reboot).",
+  "Always SAVE the live 80GB value first; write the 10GB value; check memory.total; IMMEDIATELY restore the 80GB value.",
+  "NVIDIA debug markers (0xbadf5040, 0xbadf1100, 0xbadf1300) are NOT real 80GB values — they're scratch space and should be ignored."
+ ],
+ "deliverable": "The validated cfg1/lmr (addr+value) goes into common/constants.yaml host_bar0_writes.fb_geometry.{cfg1,lmr}, then run the cmpunlocker pipeline on the CMP 170HX with root."
+}
