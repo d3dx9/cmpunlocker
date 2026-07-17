@@ -142,22 +142,74 @@ def try_memory_unlock_candidates(pci_full: str) -> dict:
     attempts = []
 
     # The cmpunlocker pipeline already proved FB-PLM is open after apply_unlock.
-    # Candidate addresses (Family B - the 13-register FB-controller geometry table):
+    # Candidate addresses (Family B - the 13-register FB-controller geometry table).
+    #
+    # Heuristics used (none of these are documented in public sources — the
+    # cmpunlocker Discord has the real values, but the Discord is closed).
+    # Without ground-truth we have to brute-force around the live 0x53
+    # baseline at 0x120048 and the size-encoding 0x10 vs 0x8 transition
+    # our boot emulator found at 0x110000 (Family A — refresh-related).
     candidates = [
-        # (addr, value, label)
+        # ===== Family B (0x120xxx) — the 80GB config target =====
+        # Live baseline at 0x120048 is 0x53 (10GB). Size encodings tried as
+        # a 2-/3-bit field (00=10GB, 01=20GB, 10=40GB, 11=80GB):
+        (0x120048, 0x00000000, "size-encoding: 00b (=0, 10GB?)"),
+        (0x120048, 0x00000001, "size-encoding: 01b"),
+        (0x120048, 0x00000002, "size-encoding: 10b"),
+        (0x120048, 0x00000003, "size-encoding: 11b (=3, 80GB?)"),
+        (0x120048, 0x00000004, "size-encoding: 100b"),
+        (0x120048, 0x00000005, "size-encoding: 101b"),
+        (0x120048, 0x00000007, "size-encoding: 111b"),
+        # Refresh-multiplier variants around the live 0x53 value:
+        (0x120048, 0x53,            "live 0x53 (10GB baseline — no change)"),
         (0x120048, 0x53 * 8,        "refresh * 8"),
-        (0x120048, 0x0A,            "refresh / 8 (more frequent)"),
-        (0x120048, 0x53 | 0x80000000, "refresh with bit31 set"),
-        (0x120048, 0x53 | 0x40000000, "refresh with bit30 set"),
-        (0x120048, 0x00000003,      "size encoding 11b (binary 80GB?)"),
-        (0x120048, 0x00000004,      "size encoding 100b"),
-        (0x120048, 0x00000007,      "size encoding 111b"),
-        # Family A - DRAM timing/refresh candidates
+        (0x120048, 0x0A,            "refresh / 8"),
+        (0x120048, 0x53 | 0x80000000, "0x53 with bit31 set"),
+        (0x120048, 0x53 | 0x40000000, "0x53 with bit30 set"),
+        (0x120048, 0x53 | 0x20000000, "0x53 with bit29 set"),
+        (0x120048, 0x53 ^ 0x80,     "0x53 with bit7 toggled"),
+        (0x120048, 0x53 ^ 0x01,     "0x53 with bit0 toggled"),
+        (0x120048, 0x53 + 1,        "0x53 + 1"),
+        (0x120048, 0x53 - 1,        "0x53 - 1"),
+        # 'k'-style candidates: 0x5X for X in 0..F
+        *((0x120048, 0x50 + n, f"0x{0x50+n:02x} low-nibble sweep")
+          for n in range(16)),
+        # lmr-candidate at 0x122200 (live 0x00)
+        (0x122200, 0x00000001,      "lmr: 1"),
+        (0x122200, 0x00000002,      "lmr: 2"),
+        (0x122200, 0x00000003,      "lmr: 3"),
+        (0x122200, 0x00000007,      "lmr: 7"),
+        (0x122200, 0x000000ff,      "lmr: 0xff"),
+        (0x122200, 0x00005300,      "lmr: 0x5300 (cfg1-relative)"),
+        (0x122200, 0x00005353,      "lmr: 0x5353"),
+        (0x122200, 0x53,            "lmr: 0x53"),
+        (0x122200, 0xff,            "lmr: 0xff"),
+        # lmr-candidate at 0x122204 (live 0x02)
+        (0x122204, 0x00000000,      "lmr-b: 0"),
+        (0x122204, 0x00000001,      "lmr-b: 1"),
+        (0x122204, 0x00000002,      "lmr-b: 2 (live)"),
+        (0x122204, 0x00000003,      "lmr-b: 3"),
+        (0x122204, 0x00000010,      "lmr-b: 0x10"),
+        # lmr at 0x122120 (live 0x00)
+        (0x122120, 0x00000001,      "lmr-c: 1"),
+        (0x122120, 0x00000003,      "lmr-c: 3"),
+        (0x122120, 0x000000ff,      "lmr-c: 0xff"),
+        # lmr at 0x122128 (live 0x00)
+        (0x122128, 0x00000001,      "lmr-d: 1"),
+        (0x122128, 0x000000ff,      "lmr-d: 0xff"),
+        # ===== Family A (0x110xxx) — booter-driven refresh/size =====
+        # The booter emulator finds 0x10 (10GB) vs 0x8 (80GB) at 0x110000
+        # and 0x7 (10GB) vs 0x5 (80GB) at 0x110600. These don't directly
+        # change the host nvidia-smi memory.total; they're FB-controller
+        # internal registers. Including them anyway for completeness.
+        (0x110000, 0x8,             "size-encoding 80GB candidate (emulator-derived)"),
+        (0x110000, 0x10,            "size-encoding 10GB (live)"),
+        (0x110600, 0x5,             "refresh-enc 80GB candidate (emulator)"),
+        (0x110600, 0x7,             "refresh-enc 10GB (live)"),
         (0x110624, 0x90,            "refresh A = boot value"),
         (0x110624, 0x48,            "refresh A / 4"),
         (0x110624, 0x24,            "refresh A / 8"),
         (0x110624, 0x900,           "refresh A * 16"),
-        # FB-PLM is already open from apply_unlock. Direct writes should work.
     ]
 
     for addr, value, label in candidates:
