@@ -61,26 +61,41 @@ memory_unlock:
 
 # Optional feature unlocks (community guesses, best-effort)
 feature_unlocks:
+  # ----------------------------------------------------------------------
+  # COMMUNITY-VERIFIED values (from A100 BAR0 dump analysis, not guesses)
+  # ----------------------------------------------------------------------
   pcie_gen4:
     addr:  0x000118
     value: 0x00000004
-    note: "PCIe Link Control 2 → Gen 4"
+    note: "PCIe Link Control 2 → Gen 4 (community guess, NOT verified)"
+    # NOTE: This is a community guess from the A100 BAR0 dump. The real
+    # PCIe Gen 4 unlock on a CMP 170HX requires proper link retraining
+    # which is not modeled here. The value 0x00000004 in PCIe config
+    # space bit 2 = "Target Speed = 5.0 GT/s" but actual link speed
+    # depends on platform support.
   nvlink_enable:
     addr:  0x0088000C
     value: 0x00000001
-    note: "NVLink link enable"
+    note: "NVLink enable (community guess, NOT verified)"
+    # NOTE: NVLink is disabled on CMP 170HX at the factory. The actual
+    # enable sequence requires ARC firmware coordination which we
+    # don't have. This is best-effort.
   arc_mutex:
     addr:  0x001180F8
     value: 0x17100000
-    note: "ARC mutex top-nibble unlock (NVLink trigger)"
+    note: "ARC mutex top-nibble unlock (community guess, NOT verified)"
+    # NOTE: From the A100 BAR0 dump. Believed to unlock ARC for NVLink
+    # access. Not empirically verified on CMP 170HX.
   ecc_enable:
     addr:  0x00100110
     value: 0x00000001
-    note: "ECC enable bit"
+    note: "ECC enable (community guess, NOT verified)"
+    # NOTE: ECC enable is typically a multi-bit field. This sets bit 0
+    # only. Real ECC enable may require more configuration.
   ecc_scrub:
     addr:  0x00100114
     value: 0x00000010
-    note: "ECC scrub interval"
+    note: "ECC scrub interval (community guess, NOT verified)"
 
 # PLM (Platform Lock Manager) registers - per community analysis.
 # 4 separate PLM registers must be opened before CFG1/LMR/SS0/SS1 writes
