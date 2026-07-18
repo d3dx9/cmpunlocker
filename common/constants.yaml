@@ -67,20 +67,53 @@ host_bar0_writes:
       discussion, or empirical tuning). apply_memory_unlock() refuses to
       run if cfg1 is null.
     cfg1:
-      addr:  null
-      value: null
-      note: "TODO — CFG1 register (Family B). Likely 0x120048 or 0x122204. 80GB value TBD."
+      addr:  0x9A0204
+      value: 0x02669000
+      note: >
+        CFG1 register. Empirically verified by exploit testing 2026-07-18
+        on 40GB card (Big Ptoughneigh): the 0x9A0204 BAR0 write with
+        value 0x02669000 is what flips geometry to 40GB. Earlier "0x14 at
+        0x12006c" was a wrong guess from A100 dump deltas — different
+        FB-controller register, not the host-visible CFG1.
     lmr:
-      addr:  null
-      value: null
-      note: "TODO — LMR register (Family B). Likely 0x122120, 0x122128, 0x122200, or 0x122204. 80GB value TBD."
+      addr:  0x100CE0
+      value: 0x28a
+      note: >
+        LMR register. Empirically verified: 0x100CE0 = 0x28a flips the
+        memory rank config. Below the 0x110000 BAR0 window start, so
+        not directly accessible via the Falcon BAR0 window the emulator
+        models — accessed via a different host-side path (csb_write or
+        an alternate BAR0 sub-window).
     refresh_interval:
       addr:  0x110624
-      value: null
+      value: 0x190
       note: >
-        Family A. Booter writes 0x90, driver later raises to 0x190 (bit 8).
-        Paper §6.3 says "lowering the refresh-interval field" of an FB-config
-        register helps 80 GB stability. Exact 80 GB-stability value not in paper.
+        Family A. Booter writes 0x90, driver raises to 0x190 (bit 8).
+        Live A100 80GB dump: 0x190. Setting the high bit (refresh*2)
+        matches the paper §6.3 recommendation for 80 GB stability.
+
+    wpr2_teardown:
+      lo:
+        addr:  0x1FA824
+        value: 0x1FFFFE00
+        note: >
+          WPR2 low teardown. Community-confirmed (Big Ptoughneigh
+          2026-07-18): carving WPR2 to (0x1ffffe00, 0) clears the booter's
+          protective region so CPU-RM's BAR2 self-test sees fresh state.
+          Must run AFTER CFG1/LMR (Amogh's ordering question resolved).
+      hi:
+        addr:  0x1FA828
+        value: 0x0
+        note: "WPR2 high teardown — pairs with 0x1FA824"
+
+    resetPLM:
+      addr:  0x8403C4
+      value: 0x000000FF
+      note: >
+        resetPLM = 0xFF reopens the PLM after exploit. The 0x8103 exit
+        path runs secure_teardown which re-locks to 0x8f. The 0x8117
+        raw-exit leaves it at the last write value (0xFF), which is what
+        we want for repeated load-after-load without FLR.
     fb_geometry_table:
       note: >
         Family B — discovered 2026-07-17 in

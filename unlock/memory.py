@@ -11,13 +11,23 @@ log = logging.getLogger(__name__)
 
 
 def _memory_config():
+    def _r(path):
+        # YAML structures like cfg1: {addr: N, value: N}
+        v = get(f'host_bar0_writes.fb_geometry.{path}')
+        if isinstance(v, dict):
+            return v.get('addr'), v.get('value')
+        return None, None
+
+    cfg1_a, cfg1_v = _r('cfg1')
+    lmr_a, lmr_v = _r('lmr')
+    ref_a, ref_v = _r('refresh_interval')
     return {
-        'cfg1_addr':       get('host_bar0_writes.fb_geometry.cfg1'),
-        'cfg1_value':      get('host_bar0_writes.fb_geometry.cfg1_value'),
-        'lmr_addr':        get('host_bar0_writes.fb_geometry.lmr'),
-        'lmr_value':       get('host_bar0_writes.fb_geometry.lmr_value'),
-        'refresh_addr':    get('host_bar0_writes.fb_geometry.refresh_interval'),
-        'refresh_value':   get('host_bar0_writes.fb_geometry.refresh_interval_value'),
+        'cfg1_addr':       cfg1_a,
+        'cfg1_value':      cfg1_v,
+        'lmr_addr':        lmr_a,
+        'lmr_value':       lmr_v,
+        'refresh_addr':    ref_a,
+        'refresh_value':   ref_v,
     }
 
 
@@ -144,12 +154,32 @@ def try_memory_unlock_candidates(pci_full: str) -> dict:
     # The cmpunlocker pipeline already proved FB-PLM is open after apply_unlock.
     # Candidate addresses (Family B - the 13-register FB-controller geometry table).
     #
-    # Heuristics used (none of these are documented in public sources — the
-    # cmpunlocker Discord has the real values, but the Discord is closed).
-    # Without ground-truth we have to brute-force around the live 0x53
-    # baseline at 0x120048 and the size-encoding 0x10 vs 0x8 transition
-    # our boot emulator found at 0x110000 (Family A — refresh-related).
-    candidates = [
+    # Two sources for the values:
+    # 1. Hardware-verified: live BAR0 dump from an A100 PCIe 80GB host
+    #    (file: a100-0000_01_00_0-bar0-16m.bin). 17 registers differ from
+    #    the live 10GB CMP values documented in constants.yaml.
+    # 2. Heuristics: brute-forced around the live 0x53 baseline and the
+    #    size-encoding 0x10 vs 0x8 transition our boot emulator found.
+    #
+    # The A100 values are tried first because they are ground truth.
+    A100_80GB_FROM_LIVE_BAR0 = [
+        (0x120040, 0x00000072,  "A100 live: 0x72 (10GB was 0)"),
+        (0x120044, 0x00000012,  "A100 live: 0x12 (10GB was 0)"),
+        (0x12006c, 0x00000014,  "A100 live: 0x14 (10GB was 0x10) — top candidate for cfg1"),
+        (0x120074, 0x0000000a,  "A100 live: 0x0a (10GB was 0x08)"),
+        (0x120078, 0x00000007,  "A100 live: 0x07 (10GB was 0x05)"),
+        (0x122004, 0x00000001,  "A100 live: 1 (10GB was 0)"),
+        (0x122008, 0x0000010a,  "A100 live: 0x10a (10GB was 0)"),
+        (0x12204c, 0x00000001,  "A100 live: 1 (10GB was 0)"),
+        (0x122050, 0xffffff8f, "A100 live: 0xffffff8f (10GB was 0)"),
+        (0x122134, 0x02811972, "A100 live: 0x2811972 (10GB was 0) — top candidate for lmr"),
+        (0x122138, 0xc7151015, "A100 live: 0xc7151015 (10GB was 0)"),
+        (0x12213c, 0x00002224, "A100 live: 0x2224 (10GB was 0)"),
+        (0x12214c, 0x170000a1, "A100 live: 0x170000a1 (10GB was 0)"),
+        (0x1221f0, 0x0003c000, "A100 live: 0x3c000 (10GB was 0)"),
+    ]
+
+    candidates = A100_80GB_FROM_LIVE_BAR0 + [
         # ===== Family B (0x120xxx) — the 80GB config target =====
         # Live baseline at 0x120048 is 0x53 (10GB). Size encodings tried as
         # a 2-/3-bit field (00=10GB, 01=20GB, 10=40GB, 11=80GB):

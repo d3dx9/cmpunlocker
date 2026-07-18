@@ -57,23 +57,49 @@ log = logging.getLogger('booter_emu')
 # and is 1 MB. Empirically the physical BAR0 offset for this window is
 # +0x110000 — Family A addresses in common/constants.yaml (0x110xxx) all
 # fall in this range.
+#
+# On GA100 there are multiple Falcon cores (SEC2, GSP-RM, FECS, ...) and
+# they use different BAR0 windows. The booter_load exploit targets the
+# GSP-RM Falcon (which uses a different window — cfg1=0x9A0204, lmr=0x100CE0).
+# For emulator support we model both windows via GSP_RM_PASSTHROUGH.
 FALCON_BAR0_WIN_BASE = 0x300000000
 FALCON_BAR0_POFFSET = 0x110000
 FALCON_BAR0_WIN_SIZE = 0x100000
 
+# GSP-RM Falcon sees BAR0 differently — addresses < 0x1000000 are direct
+# BAR0 offsets (no window remapping). Required for the community ROP chain
+# which writes to 0x9A0204 etc.
+GSP_RM_PASSTHROUGH = True
+
 # Booter vaddr layout per the .ga100_* sections in 580.x firmware.
+# The .section_task_rm_elf_text_instance is the GSP-RM firmware (15MB)
+# containing subroutines like 0x1d0f (report_status) and 0x7e76
+# (secure_teardown). Loading it enables full simulation of 0x810D/0x8103
+# exploit return paths.
 BOOTER_LAYOUT = {
     '.ga100_text':           0x004005000,
     '.ga100_resident_text':  0x00400a000,
     '.ga100_data':           0x004001000,
     '.ga100_resident_data':  0x00400d000,
+    # Inner ELF containing subroutines like 0x1d0f (report_status)
+    # and 0x7e76 (secure_teardown) called from 0x810D/0x8103 exploit paths.
+    '.section_task_init_elf_text_instance': 0x4018000,
+    # GSP-RM firmware proper.
+    '.section_task_rm_elf_text_instance': 0x4d22000,
 }
 
 
 def vaddr_to_bar0(vaddr):
-    """Return physical BAR0 offset for a Falcon-window vaddr, or None."""
+    """Return physical BAR0 offset for a Falcon-window vaddr, or None.
+
+    Models two cases:
+    1. SEC2 window 0x300000000-0x300ffffff → physical 0x110000-0x20ffff.
+    2. GSP-RM passthrough: any vaddr < 16 MB is treated as direct BAR0.
+    """
     if FALCON_BAR0_WIN_BASE <= vaddr < FALCON_BAR0_WIN_BASE + FALCON_BAR0_WIN_SIZE:
         return (vaddr - FALCON_BAR0_WIN_BASE) + FALCON_BAR0_POFFSET
+    if GSP_RM_PASSTHROUGH and vaddr < 0x1000000:
+        return vaddr
     return None
 
 
@@ -81,6 +107,8 @@ def bar0_to_falcon_vaddr(bar0_addr):
     """Inverse of ``vaddr_to_bar0`` for addresses in the Falcon BAR0 window."""
     if FALCON_BAR0_POFFSET <= bar0_addr < FALCON_BAR0_POFFSET + FALCON_BAR0_WIN_SIZE:
         return FALCON_BAR0_WIN_BASE + (bar0_addr - FALCON_BAR0_POFFSET)
+    if GSP_RM_PASSTHROUGH and bar0_addr < 0x1000000:
+        return bar0_addr
     return None
 
 
@@ -139,7 +167,17 @@ class FalconBooter:
     values to model A100 die variants.
     """
 
-    MEM_BASE = 0x004000000  # arbitrary vaddr strictly below every section
+    # GA100 SEC2 Falcon has 64 KB SRAM (addresses 0x4000000-0x400FFFF).
+    # The booter stores sections in the lower portion; stack, BSS and
+    # heap occupy the rest.  Without allocating the full 64 KB the
+    # stack lands in unmapped memory and every load/store there returns
+    # garbage fuse bytes, corrupting the entire execution.
+    #
+    # If GSP-RM is loaded we extend to cover the full GSP-RM range too
+    # (0x4d22000-0x5cd6000). Without GSP-RM we stay at 64 KB.
+    MEM_BASE = 0x004000000
+    MEM_SIZE_DEFAULT = 0x10000  # 64 KB (booter + booter_load only)
+    MEM_SIZE_WITH_RM = 0x1CE0000  # 30 MB (covers booter + GSP-RM)
 
     def __init__(self, sections, fuse_value_0x7ca=0, max_steps=1_000_000,
                  trace=False, trace_pc=False, pc_entry=None, **_unused):
@@ -166,18 +204,31 @@ class FalconBooter:
         self.halt_reason = None
         self._sections = sections
 
-        needed = 0
-        for name, vaddr in BOOTER_LAYOUT.items():
-            size = len(sections.get(name, b''))
-            needed = max(needed, (vaddr - self.MEM_BASE) + size)
-        self.mem = bytearray(needed)
-
+        # Full Falcon SRAM, zero-initialised.
+        # If GSP-RM is included, allocate the full range.
+        has_gsp_rm = bool(sections.get('.section_task_rm_elf_text_instance'))
+        self.MEM_SIZE = self.MEM_SIZE_WITH_RM if has_gsp_rm else self.MEM_SIZE_DEFAULT
+        self.mem = bytearray(self.MEM_SIZE)
         for name, vaddr in BOOTER_LAYOUT.items():
             data = sections.get(name, b'')
             if not data:
                 continue
             off = vaddr - self.MEM_BASE
+            if off < 0 or off + len(data) > self.MEM_SIZE:
+                continue
             self.mem[off:off + len(data)] = data
+
+        # Shadow BAR0 window (1 MB) so reads from Falcon vaddr
+        # 0x300000000-0x3000FFFFF return the last value written there.
+        # Without this the 80 GB boot path's spinlock (which reads a
+        # pointer from BAR0[0x110094]) gets back fuse garbage and hangs.
+        self._bar0_win = bytearray(FALCON_BAR0_WIN_SIZE)
+
+        # Low-memory storage (vaddr < MEM_BASE, e.g. FWSEC spinlock at
+        # 0x97). FWSEC writes 0x11dead there, then the 80GB-path spinlock
+        # code reads it back. Without persistent storage, the spinlock
+        # appears busy (returns fuse garbage) and the boot hangs at 0x400c3c0.
+        self._fuse_mem = {}
 
         # The booter's reset vector is the very first instruction of
         # .ga100_text (the first 0x40 bytes some booters reserve as a
@@ -193,18 +244,32 @@ class FalconBooter:
         return x - (1 << b) if x & (1 << (b - 1)) else x
 
     def _read_v(self, vaddr, sz):
+        # Reads from the Falcon BAR0 window (Falcon view of PCIe BAR0)
+        # must return the values that were stored there, not garbage.
+        if FALCON_BAR0_WIN_BASE <= vaddr < FALCON_BAR0_WIN_BASE + FALCON_BAR0_WIN_SIZE:
+            win_off = vaddr - FALCON_BAR0_WIN_BASE
+            return int.from_bytes(self._bar0_win[win_off:win_off + sz], 'little')
+
         off = vaddr - self.MEM_BASE
         if off < 0 or off + sz > len(self.mem):
-            # Unmapped: return fuse-derived bytes (low byte = low
-            # fuse byte) so LBU/LW from a fuse-DMA region produces
-            # fuse-dependent branch inputs. Without this the booter
-            # never reaches size-dependent conditional paths.
+            # Unmapped low memory (vaddr < MEM_BASE, e.g. 0x97 spinlock):
+            # If we have a stored value (from FWSEC writes), use it.
+            # Otherwise return fuse-derived bytes so LBU/LW from a fuse-DMA
+            # region produces fuse-dependent branch inputs.
+            if vaddr in self._fuse_mem:
+                val = self._fuse_mem[vaddr]
+                return val & ((1 << (sz * 8)) - 1)
             if sz <= 8:
                 return (self.fuse_value_0x7ca >> ((off & 7) * 8)) & ((1 << (sz * 8)) - 1)
             return 0
         return int.from_bytes(self.mem[off:off + sz], 'little')
 
     def _write_v(self, vaddr, val, sz):
+        # Unmapped low memory (vaddr < MEM_BASE, e.g. 0x97 spinlock):
+        # Store in _fuse_mem so reads return the same value.
+        if vaddr < self.MEM_BASE:
+            self._fuse_mem[vaddr] = val & ((1 << (sz * 8)) - 1)
+            return
         off = vaddr - self.MEM_BASE
         if off < 0 or off + sz > len(self.mem):
             return
@@ -212,6 +277,12 @@ class FalconBooter:
 
     def _store(self, addr, val, sz, pc):
         self._write_v(addr, val, sz)
+        # Also shadow the BAR0 window so future reads from the Falcon
+        # vaddr range 0x300000000-0x3000FFFFF return the stored data.
+        if FALCON_BAR0_WIN_BASE <= addr < FALCON_BAR0_WIN_BASE + FALCON_BAR0_WIN_SIZE:
+            win_off = addr - FALCON_BAR0_WIN_BASE
+            b = (val & ((1 << (sz * 8)) - 1)).to_bytes(sz, 'little')
+            self._bar0_win[win_off:win_off + sz] = b
         bar0_addr = vaddr_to_bar0(addr)
         if bar0_addr is not None:
             v32 = val & ((1 << (sz * 8)) - 1)
@@ -313,22 +384,30 @@ class FalconBooter:
         # RV32I OP base
         if funct7 == 0:
             if funct3 == 0:
-                self.regs[rd] = (v1 + v2) & 0xFFFFFFFFFFFFFFFF
-                return True, None
+                 self.regs[rd] = (v1 + v2) & 0xFFFFFFFFFFFFFFFF
+                 return True, None
             if funct3 == 1:
-                self.regs[rd] = (v1 << (v2 & 0x3f)) & 0xFFFFFFFFFFFFFFFF
+                # SLL: in RV32, only low 5 bits of rs2 are used (RV64 uses 6)
+                self.regs[rd] = (v1 << (v2 & 0x1f)) & 0xFFFFFFFFFFFFFFFF
                 return True, None
             if funct3 == 2:
-                self.regs[rd] = 1 if self._sxt(v1, 64) < self._sxt(v2, 64) else 0
+                # SLT: sign-extend 32-bit operands to 64-bit then compare
+                self.regs[rd] = 1 if self._sxt(v1 & 0xFFFFFFFF, 32) < self._sxt(v2 & 0xFFFFFFFF, 32) else 0
                 return True, None
             if funct3 == 3:
-                self.regs[rd] = 1 if v1 < v2 else 0
+                self.regs[rd] = 1 if (v1 & 0xFFFFFFFF) < (v2 & 0xFFFFFFFF) else 0
                 return True, None
             if funct3 == 4:
                 self.regs[rd] = (v1 ^ v2) & 0xFFFFFFFFFFFFFFFF
                 return True, None
             if funct3 == 5:
-                self.regs[rd] = (v1 >> (v2 & 0x3f)) & 0xFFFFFFFFFFFFFFFF
+                # SRL: in RV32, only low 5 bits of rs2 are used (RV64 uses 6).
+                # The result is sign-extended to 64 bits in our 64-bit register.
+                result32 = (v1 & 0xFFFFFFFF) >> (v2 & 0x1f)
+                # Sign-extend 32-bit result to 64-bit
+                if result32 & 0x80000000:
+                    result32 |= 0xFFFFFFFF00000000
+                self.regs[rd] = result32
                 return True, None
             if funct3 == 6:
                 self.regs[rd] = (v1 | v2) & 0xFFFFFFFFFFFFFFFF
@@ -342,14 +421,19 @@ class FalconBooter:
                 self.regs[rd] = (v1 - v2) & 0xFFFFFFFFFFFFFFFF
                 return True, None
             if funct3 == 5:
-                if v1 & (1 << 63):
-                    shamt = v2 & 0x3f
+                # SRA: in RV32, only low 5 bits of rs2 (RV64 uses 6).
+                # Sign-extend 32-bit operand to 64-bit first, then arithmetic shift.
+                v1_32 = v1 & 0xFFFFFFFF
+                if v1_32 & 0x80000000:
+                    v1_32 |= 0xFFFFFFFF00000000
+                shamt = v2 & 0x1f
+                if v1_32 & (1 << 63):
                     self.regs[rd] = (
-                        (v1 >> shamt)
+                        (v1_32 >> shamt)
                         | (((1 << shamt) - 1) << (64 - shamt))
                     ) & 0xFFFFFFFFFFFFFFFF
                 else:
-                    self.regs[rd] = (v1 >> (v2 & 0x3f)) & 0xFFFFFFFFFFFFFFFF
+                    self.regs[rd] = (v1_32 >> shamt) & 0xFFFFFFFFFFFFFFFF
                 return True, None
         # RV32M extension (MUL / MULH / MULHSU / MULHU / DIV / DIVU / REM / REMU)
         if funct7 == 0x01:
@@ -441,27 +525,46 @@ class FalconBooter:
             if funct3 == 0:    # ADDI
                 self.regs[rd] = (v1 + imm) & 0xFFFFFFFFFFFFFFFF
             elif funct3 == 1:  # SLLI
-                shamt = (insn >> 20) & 0x3f
-                self.regs[rd] = (v1 << shamt) & 0xFFFFFFFFFFFFFFFF
+                # RV32 uses 5-bit shamt, RV64 uses 6-bit
+                shamt = (insn >> 20) & 0x1f
+                result32 = (v1 & 0xFFFFFFFF) << shamt
+                # Mask to 32 bits, then sign-extend
+                result32 &= 0xFFFFFFFF
+                if result32 & 0x80000000:
+                    result32 |= 0xFFFFFFFF00000000
+                self.regs[rd] = result32
             elif funct3 == 2:  # SLTI
-                self.regs[rd] = 1 if v1 < imm else 0
+                # Sign-extend both operands to 64-bit for signed comparison
+                self.regs[rd] = 1 if self._sxt(v1 & 0xFFFFFFFF, 32) < self._sxt(imm & 0xFFFFFFFF, 32) else 0
             elif funct3 == 3:  # SLTIU
-                self.regs[rd] = 1 if (v1 & 0xFFFFFFFFFFFFFFFF) < (imm & 0xFFFFFFFFFFFFFFFF) else 0
+                self.regs[rd] = 1 if (v1 & 0xFFFFFFFF) < (imm & 0xFFFFFFFF) else 0
             elif funct3 == 4:  # XORI
                 self.regs[rd] = (v1 ^ imm) & 0xFFFFFFFFFFFFFFFF
             elif funct3 == 5:  # SRLI/SRAI/Falcon-shift
-                shamt = (insn >> 20) & 0x3f
+                # RV32 uses 5-bit shamt, RV64 uses 6-bit
+                shamt = (insn >> 20) & 0x1f
                 if funct7 == 0:    # SRLI
-                    self.regs[rd] = (v1 >> shamt) & 0xFFFFFFFFFFFFFFFF
+                    # Sign-extend 32-bit result to 64-bit register
+                    result32 = (v1 & 0xFFFFFFFF) >> shamt
+                    if result32 & 0x80000000:
+                        result32 |= 0xFFFFFFFF00000000
+                    self.regs[rd] = result32
                 elif funct7 == 0x20:  # SRAI
-                    if v1 & (1 << 63):
-                        self.regs[rd] = ((v1 >> shamt) | (((1 << shamt) - 1) << (64 - shamt))) & 0xFFFFFFFFFFFFFFFF
+                    # Sign-extend 32-bit operand first, then arithmetic shift
+                    v1_32 = v1 & 0xFFFFFFFF
+                    if v1_32 & 0x80000000:
+                        v1_32 |= 0xFFFFFFFF00000000
+                    if v1_32 & (1 << 63):
+                        self.regs[rd] = ((v1_32 >> shamt) | (((1 << shamt) - 1) << (64 - shamt))) & 0xFFFFFFFFFFFFFFFF
                     else:
-                        self.regs[rd] = (v1 >> shamt) & 0xFFFFFFFFFFFFFFFF
+                        self.regs[rd] = (v1_32 >> shamt) & 0xFFFFFFFFFFFFFFFF
                 elif funct7 == 0x30:  # RORI (Zbb — rotate right immediate)
                     v = v1 & 0xFFFFFFFF
                     if shamt:
-                        self.regs[rd] = (((v >> shamt) | (v << (32 - shamt))) & 0xFFFFFFFF) & 0xFFFFFFFFFFFFFFFF
+                        result32 = ((v >> shamt) | (v << (32 - shamt))) & 0xFFFFFFFF
+                        if result32 & 0x80000000:
+                            result32 |= 0xFFFFFFFF00000000
+                        self.regs[rd] = result32
                     else:
                         self.regs[rd] = v1
                 else:
@@ -479,11 +582,26 @@ class FalconBooter:
             else:
                 log.warning('unknown OPIMM funct3=%d insn=0x%x', funct3, insn)
             self.pc += 4
-        elif opc in (0x33, 0x3b):  # OP / Falcon-OP (duplicate space)
-            # Falcon reuses opc=0x33's semantics under a second opcode
-            # (0x3b) for what looks like an internal Falcon double-issued
-            # ALU. Behaviour matches: funct7=0 → base, funct7=0x20 →
-            # SUB/SRA, funct7=0x01 → RV32M, funct7=0x30 → RORI (Zbb).
+        elif opc in (0x33, 0x3b):  # OP / Falcon-OP (dual-issue ALU)
+            # Falcon SEC2 has TWO independent ALU units. 0x33 issues to
+            # the primary ALU, 0x3b to a secondary "shadow" ALU that
+            # executes in parallel with the next instruction on 0x33.
+            #
+            # Evidence (in addition to NS-mode FWSEC analysis below):
+            #   - Tegra X1 Falcon ISA (envytools envydis/falcon.c) has
+            #     a similar 0x3b opcode that maps to ADD/ADC/SUB/SBB/SHL/
+            #     SHR/SAR/SHLC/SHRC, with a different encoding (Tegra X1
+            #     is not RISC-V; GA100 SEC2 is RISC-V).
+            #   - In HS mode, 0x3b is overridden to mean mpopaddret
+            #     (multi-pop + optional add + return) — used in the
+            #     booter_load ROP exploit chain. See booter_secure.py.
+            #
+            # Empirical FWSEC analysis (booter_emu.py reverse-engineered):
+            #   0x33 (211 uses): full RV32I OP + RV32M + Zbb coverage
+            #   0x3b (47 uses):  predominantly ADD/SUB (42 of 47),
+            #                    some MUL/SLL/REMU; compiler uses 0x3b
+            #                    for independent accumulation paths
+            #                    so 0x33 and 0x3b can dual-issue.
             v1 = self.regs[rs1]
             v2 = self.regs[rs2]
             handled, unknown_msg = self._exec_op(rd, v1, v2, funct3, funct7, insn)
@@ -691,6 +809,10 @@ class FalconBooter:
                 # Unknown / non-standard AMO (e.g. funct5=0x1d). Falcon-specific.
                 # Treat as NOP — advance PC, do not touch memory or registers.
                 self.pc += 4
+        elif opc == 0x0f:  # FENCE / FENCE.I — memory ordering, treat as NOP
+            # fm=0: FENCE pred/succ (ignored in single-thread emulator)
+            # fm=1: FENCE.I (instr fence, also NOP here)
+            self.pc += 4
         else:
             log.warning('unknown opcode 0x%x insn=0x%x at PC=0x%x', opc, insn, self.pc)
             self.pc += 4
