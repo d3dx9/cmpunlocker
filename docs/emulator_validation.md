@@ -75,6 +75,50 @@ The emulator simulates the **normal boot flow** (loading `.ga100_text`, running 
 
 These require real hardware (or a cycle-accurate simulation like xsim/riscv-isa-sim).
 
+## Why no AES key is needed
+
+A common misconception is that we need the AES/HMAC keys to sign our patched
+section. We don't, because the BootROM bug bypasses signature verification
+entirely:
+
+```
+Normal BootROM flow (without exploit):
+  1. Load .fwsignature_ga100 into DMEM
+  2. AES-decrypt the section content (needs key)
+  3. HMAC-verify the section (needs key)
+  4. If verify OK → continue; if fail → abort
+
+Exploited BootROM flow (with our patch):
+  1. Load our patched .fwsignature_ga100 into DMEM
+  2. The bug: DMEM is executable in HS-mode
+  3. Our 24-DWORD ROP chain runs as HS-mode code
+  4. PLM register is written
+  5. BootROM tries AES-decrypt + HMAC-verify → FAILS (we patched it!)
+  6. BootROM aborts
+  7. But our PLM write already happened — unlocked!
+  8. Driver later restores the original .fwsignature_ga100 section
+  9. Driver's normal boot proceeds with valid signature
+ 10. Driver sees PLM open → our unlock values stick
+```
+
+The AES key is only needed for the **verification** path (step 2-3 in the
+normal flow), which we bypass by running our code **before** the verification
+happens (the bug).
+
+The modified driver (`open-gpu-kernel-modules-610.43.03`) makes this explicit:
+- It saves the original signature content
+- It replaces the in-memory buffer with our 24-DWORD ROP chain
+- It triggers `kgspExecuteBooterLoad` which makes the BootROM load our buffer
+- The BootROM's verification fails, but our write already happened
+- It restores the original signature before the normal driver boot
+
+So the unlock requires:
+- ✓ Root access
+- ✓ Writable `/lib/firmware/nvidia/580.105.08/gsp_tu10x.bin`
+- ✓ Real GPU passthrough (not virtualized)
+- ✗ NO AES key needed
+- ✗ NO HMAC key needed
+
 ## How to run
 
 ```bash
