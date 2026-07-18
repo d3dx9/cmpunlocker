@@ -1,5 +1,29 @@
 # PCIe Gen 4 Unlock — Analysis and Findings
 
+## Two approaches, one verified, one experimental
+
+We provide **two scripts** for enabling PCIe Gen 4:
+
+### Approach 1: `scripts/pcie_gen4_unlock.sh` — **VERIFIED, PRIMARY**
+
+Uses standard **PCI Config Space access** via `setpci`:
+- Reads Link Capabilities to verify Gen 4 is supported
+- Reads root complex (motherboard) capability
+- Writes PCIe Link Control 2 (offset 0x68) to set Target Speed = Gen 4
+- Triggers link retraining via PCIe Link Control (offset 0x70)
+- Verifies the new link speed
+
+**This is the correct, standards-compliant way to enable Gen 4.**
+Works on any Linux with root, regardless of the booter exploit.
+
+### Approach 2: `scripts/pcie_gen4_unlock_bar0.py` — **EXPERIMENTAL**
+
+Attempts to enable Gen 4 via **BAR0 PTOP registers** (similar to the
+booter exploit pattern). Uses HYPOTHETICAL register addresses based
+on NVIDIA naming convention. NOT empirically verified.
+
+**Use this only as a research tool. The primary method is setpci.**
+
 ## What we searched
 
 We analyzed the **CMP 170HX 8GB VBIOS** (1044 KB at `/tmp/cmp170hx_8gb.rom`) and the **A100 80GB GSP firmware** (30 MB at `/lib/firmware/nvidia/580.105.08/gsp_tu10x.bin`) for PCIe Gen 4 unlock sequences.
