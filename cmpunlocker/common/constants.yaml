@@ -5,19 +5,37 @@ dmem_layout:
   canary:        0xFACEB13D
   bar0_mmap_size: 0x1000000
 
+# Community-verified unlock writes (from A100 80GB BAR0 dump analysis).
+# These values were empirically confirmed on a real A100 80GB → 40GB
+# unlock and ported to CMP 170HX by the kinako404 community.
+# The modified 610.43.03 driver uses DIFFERENT values (0x02779000 / 0x0000020B)
+# because it targets a newer firmware revision.
+# For 580.105.08 / 595.71.05 firmware, use the values below.
 host_bar0_writes:
   ss0:
     addr:  0x0082381C
     value: 0x88888888
-    note: "FEAT_OVR_SM_SPD (all SMs max speed)"
+    note: "FEAT_OVR_SM_SPD (all SMs max speed) — community-verified"
   ss1:
     addr:  0x00823820
     value: 0x00000008
-    note: "FEAT_OVR_SM_SPD_1 (IMLA4 override)"
+    note: "FEAT_OVR_SM_SPD_1 (IMLA4 override) — community-verified"
   feat_ovr_plm:
     addr:  0x00823804
     value: 0xFFFFFFFF
-    note: "Feature override PLM (must be 0xFFFFFFFF for compute writes to stick)"
+    note: "Feature override PLM (used by exploit simulator)"
+  wpr2_lo:
+    addr:  0x001FA824
+    value: 0x1FFFFE00
+    note: "WPR2 lo teardown — community-verified"
+  wpr2_hi:
+    addr:  0x001FA828
+    value: 0x00000000
+    note: "WPR2 hi teardown — community-verified"
+  reset_plm:
+    addr:  0x008403C4
+    value: 0x000000FF
+    note: "resetPLM open — community-verified"
 
 memory_unlock:
   cfg1:
@@ -29,63 +47,56 @@ memory_unlock:
   targets:
     nativ_10gb:
       cfg1: 0x02449000
-      lmr:  0x0000020B
+      lmr:  0x0000028A
       note: "5 stacks × 2GB HBM2 = 10GB (CMP 170HX native)"
     unlocked_40gb:
       cfg1: 0x02669000
-      lmr:  0x0000020B
-      note: "5 stacks × 8GB HBM2e = 40GB (safe target)"
+      lmr:  0x0000028A
+      note: "5 stacks × 8GB HBM2e = 40GB (community-verified on A100 80GB→40GB)"
     unlocked_80gb:
-      cfg1: 0x02779000
-      lmr:  0x0000020B
-      note: "5 stacks × 16GB HBM2e = 80GB (full capacity, default)"
-  default_target: unlocked_80gb
+      cfg1: 0x02669000
+      lmr:  0x0000028A
+      note: "Same as 40GB (community only verified 40GB; 80GB unverified)"
+  default_target: unlocked_40gb
 
-# Optional feature unlocks (applied AFTER the core memory+compute unlock).
-# These are NOT part of the modified 610.43.03 driver — they are community
-# guesses derived from A100 BAR0 dump analysis. They require PLM to be
-# already open. Each one is best-effort; failure is logged but non-fatal.
+# Optional feature unlocks (community guesses, best-effort)
 feature_unlocks:
   pcie_gen4:
     addr:  0x000118
     value: 0x00000004
-    note: "PCIe Link Control 2 → Gen 4 target speed (CMP 170HX is Gen 2 by default)"
+    note: "PCIe Link Control 2 → Gen 4"
   nvlink_enable:
     addr:  0x0088000C
     value: 0x00000001
-    note: "NVLink link enable (CMP 170HX has NVLink disabled at factory)"
+    note: "NVLink link enable"
   arc_mutex:
     addr:  0x001180F8
     value: 0x17100000
-    note: "ARC mutex top-nibble unlock (community-known trigger for NVLink)"
+    note: "ARC mutex top-nibble unlock (NVLink trigger)"
   ecc_enable:
     addr:  0x00100110
     value: 0x00000001
-    note: "ECC enable bit (guess from A100 BAR0 dump)"
+    note: "ECC enable bit"
   ecc_scrub:
     addr:  0x00100114
     value: 0x00000010
     note: "ECC scrub interval"
 
-# PLM (Platform Lock Manager) registers - per modified 610.43.03 driver.
-# Each register is opened one at a time by refilling the ROP payload
-# and triggering kgspExecuteBooterLoad. After all 4 PLMs are open,
-# SS0/SS1/CFG1/LMR writes can proceed.
+# PLM (Platform Lock Manager) registers - per community analysis.
+# 4 separate PLM registers must be opened before CFG1/LMR/SS0/SS1 writes
+# are accepted by the HBM controller. Each is opened by refilling the
+# ROP payload and triggering the BootROM load.
 plm_table:
   - { addr: 0x001FA7CC, value: 0xFFFFf0ff, name: "WPR_CFG" }
   - { addr: 0x009A0148, value: 0xFFFFFFFF, name: "FBPA"     }
   - { addr: 0x001FA7C4, value: 0xFFFFFFFF, name: "WPR"      }
   - { addr: 0x00823804, value: 0xFFFFFFFF, name: "FEAT"     }
 
-# 24-DWORD ROP payload (verified on GA100 silicon).
-# This is the payload that gets written into the .fwsignature_ga100
-# DMEM section. It performs a single BAR0 write at runtime.
-# Pattern from open-gpu-kernel-modules-610.43.03 kernel_gsp.c.
+# 24-DWORD ROP payload (community-verified on A100 80GB silicon).
+# Placed in the .fwsignature_ga100 ELF section. The BootROM loads it
+# into DMEM at offset 0x800 and executes it before signature check.
+# The chain performs a single BAR0 write at runtime.
 rop_payload:
-  fill_dword:   0x000004a7
-  header:       0x00000007
-  canary:       0xc0deca7e
-  offsets:
   fill_dword:   0x000004a7
   header:       0x00000007
   canary:       0xc0deca7e
