@@ -191,6 +191,11 @@ def run_full_unlock(pci_full: str, gsp_path: str = None,
     ss0_ok = _write_bar0(pci_full, ss0_addr, ss0_val, 'SS0')
     ss1_ok = _write_bar0(pci_full, ss1_addr, ss1_val, 'SS1')
 
+    log.info("[%s] Applying optional feature unlocks (PCIe, NVLink, ECC)", pci_full)
+    from unlock.features import apply_feature_unlocks
+    feat_results = apply_feature_unlocks(pci_full)
+    feat_ok = all(r.get("stuck", False) for r in feat_results.values()) if feat_results else True
+
     log.info("[%s] Restoring original GSP signature", pci_full)
     shutil.copy2(backup, gsp_path)
 
@@ -199,10 +204,11 @@ def run_full_unlock(pci_full: str, gsp_path: str = None,
     time.sleep(3)
 
     all_ok = cfg1_ok and lmr_ok and ss0_ok and ss1_ok
-    log.info("[%s] Pipeline complete — memory=%s compute=%s overall=%s",
+    log.info("[%s] Pipeline complete — memory=%s compute=%s features=%s overall=%s",
              pci_full,
              "OK" if (cfg1_ok and lmr_ok) else "FAIL",
              "OK" if (ss0_ok and ss1_ok) else "FAIL",
+             "OK" if feat_ok else "PARTIAL",
              "OK" if all_ok else "FAIL")
     return all_ok
 

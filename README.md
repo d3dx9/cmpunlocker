@@ -74,9 +74,9 @@ journalctl -u cmpunlocker -f
 | Full SM compute throughput (SS0/SS1) | ✅ Working |
 | 80GB HBM2e memory (5 × 16GB) | ✅ Working (default) |
 | 40GB HBM2e memory (5 × 8GB) | ✅ Working (alternative) |
-| NVLink | 🔬 Planned |
-| ECC | 🔬 Planned |
-| PCIe Gen 4 | 🔬 Planned |
+| PCIe Gen 4 | ⚠️ Best-effort (community guess) |
+| NVLink | ⚠️ Best-effort (community guess) |
+| ECC | ⚠️ Best-effort (community guess) |
 
 ---
 

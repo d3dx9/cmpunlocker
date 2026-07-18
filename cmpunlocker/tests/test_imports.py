@@ -14,6 +14,7 @@ DIRECT_IMPORT_MODULES = [
     "payload.gsp_patch",
     "unlock.compute",
     "unlock.memory",
+    "unlock.features",
 ]
 
 

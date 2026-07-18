@@ -20,6 +20,7 @@ from payload.gpu import find_all_gpus
 from payload.pipeline import run_full_unlock
 from unlock.compute import apply_unlock as apply_compute, is_plm_open, is_unlocked
 from unlock.memory import apply_unlock as apply_memory, is_memory_unlocked
+from unlock.features import apply_feature_unlocks, is_pcie_gen4, is_nvlink_enabled
 
 CHECK_INTERVAL = 1  # seconds
 
@@ -58,6 +59,9 @@ def _check_card(pci: str) -> None:
                 log.info("[%s] Reapplied memory unlock", pci)
             else:
                 log.warning("[%s] Memory reapply failed: %s", pci, msg)
+
+        if not is_pcie_gen4(pci) or not is_nvlink_enabled(pci):
+            apply_feature_unlocks(pci)
 
     except Exception as exc:
         log.error("[%s] Monitor error: %s", pci, exc)
