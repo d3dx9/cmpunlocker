@@ -28,15 +28,17 @@ log = logging.getLogger(__name__)
 
 
 # Order of feature unlock execution
+# NOTE: pcie_gen4 is EXCLUDED because the value 0x000118 is in PCIe
+# Config Space, NOT in BAR0 MMIO. Writing it to BAR0 has no effect.
+# Real PCIe Gen 4 unlock would require:
+#   - Writing to PCIe config space (not BAR0)
+#   - Link retraining via PCI Link Control register
+#   - Platform support from the root complex
 FEATURE_ORDER = [
-    "pcie_gen4",
     "nvlink_enable",
     "arc_mutex",
     "ecc_enable",
     "ecc_scrub",
-    "pll_unlock",
-    "power_limit",
-    "thermal_limit",
 ]
 
 
