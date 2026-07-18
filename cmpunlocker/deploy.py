@@ -55,28 +55,40 @@ log = logging.getLogger('deploy')
 # =============================================================================
 
 # Available CFG1 values (verified from A100 32GB and 80GB VBIOS strap_info tables):
-#   0x02449000 = 10GB native (5 × 2GB HBM2)        [CMP 170HX default]
-#   0x02700000 = 32GB unlock (4 × 8GB HBM2e)         [from 32GB VBIOS analysis]
-#   0x02669000 = 40GB unlock (5 × 8GB HBM2e)         [community-verified]
-#   0x02770000 = hypothesized 64GB (4 × 16GB HBM2e) [no direct VBIOS evidence yet]
-#   0x02779000 = 80GB unlock (5 × 16GB HBM2e)        [from 80GB VBIOS analysis]
 #
-# CFG1 register bit layout (from VBIOS analysis):
-#   bits[31:24] = 0x02  (boot flag, always set in strap_info entries)
-#   bits[23:16] = strap byte (0x44=2GB HBM2, 0x55=4GB HBM2, 0x66=8GB HBM2e, 0x70=8GB HBM2e, 0x77=16GB HBM2e)
-#   bits[15:8]  = stack count feature (0x00=4 stacks, 0x90=5 stacks)
+# CFG1 bit layout (from VBIOS analysis):
+#   bits[31:24] = 0x02       (boot flag, always set in strap_info entries)
+#   bits[23:16] = strap byte (per-stack HBM capacity):
+#                  0x44 = 2GB HBM2  (CMP 170HX native per-stack)
+#                  0x55 = 4GB HBM2  (some 4GB HBM2 variants)
+#                  0x66 = 8GB HBM2e (modern A100 per-stack, standard)
+#                  0x70 = 8GB HBM2e with 4-stack encoding (32GB variant)
+#                  0x77 = 16GB HBM2e (80GB per-stack)
+#   bits[15:8]  = stack count feature:
+#                  0x00 = 4 active stacks
+#                  0x90 = 5 active stacks
 #   bits[7:0]   = 0x00 (reserved)
 #
+# Total memory = (per-stack capacity) × (active stacks)
+# Per-stack capacity is in bits[23:16], stack count is in bits[15:8].
+#
+# Verified combinations:
+#   10GB = 0x02449000 = 5 × 2GB HBM2 (CMP 170HX native)
+#   40GB = 0x02669000 = 5 × 8GB HBM2e (modern A100)
+#   80GB = 0x02779000 = 5 × 16GB HBM2e (modern A100)
+#   32GB = 0x02700000 = 4 × 8GB HBM2e (from VBIOS)
+#   64GB = 0x02770000 = 4 × 16GB HBM2e (hypothesized)
+#
 # Memory type note: Modern A100s (40GB+, SXM4-80GB) use HBM2e. Older
-# pre-2022 A100s (40GB SXM4) used HBM2 (different strap byte 0x66
-# means different things). On CMP 170HX with 10GB HBM2, switching to
-# 0x66 HBM2e mode at 8GB/stack gives 40GB of HBM2e.
+# pre-2022 A100s (40GB SXM4) used HBM2. The strap byte 0x66 means
+# different things for different memory types - the silicon auto-detects.
 ALL_CFG1_VALUES = {
-    'nativ_10gb':    0x02449000,
-    'unlocked_32gb':  0x02700000,  # 4 × 8GB HBM2e
+    'nativ_8gb':     0x01540000,  # 4 × 2GB HBM2 (CMP 170HX 8GB native - one stack dead)
+    'nativ_10gb':    0x02449000,  # 5 × 2GB HBM2 (CMP 170HX 10GB default)
+    'unlocked_32gb':  0x02700000,  # 4 × 8GB HBM2e (from 32GB VBIOS)
     'unlocked_40gb':  0x02669000,  # 5 × 8GB HBM2e (modern A100)
     'unlocked_64gb':  0x02770000,  # hypothesized: 4 × 16GB HBM2e
-    'unlocked_80gb':  0x02779000,  # 5 × 16GB HBM2e
+    'unlocked_80gb':  0x02779000,  # 5 × 16GB HBM2e (from 80GB VBIOS)
 }
 
 UNLOCK_WRITES = [
