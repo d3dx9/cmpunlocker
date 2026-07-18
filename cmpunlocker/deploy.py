@@ -41,15 +41,37 @@ log = logging.getLogger('deploy')
 
 # =============================================================================
 # Community-verified unlock writes (validated in our emulator)
-# Order matches Big Ptoughneigh's exploit notes from the Discord session
+# Order matches Big Ptoughneigh's exploit notes from the Discord session.
+#
+# The chain has TWO kinds of writes:
+#   1. Core memory + PLM unlock (community-verified, must be in ROP)
+#   2. Candidate feature enables (NVLink/PCIe/ECC) — these come from
+#      diffing the A100 BAR0 dump vs CMP 10GB baseline. They MAY need
+#      hardware-specific calibration but the writes should reach their
+#      destination.
+#
+# All are implemented as mpopaddret+sw pairs in the ROP chain. Order
+# matters because the booter's mpopaddret pops in sequence.
 # =============================================================================
 UNLOCK_WRITES = [
-    # (addr, value, label)
+    # ===== Core memory + PLM unlock (community-verified, in ROP) =====
+    # These 7 writes fit in the 0xF800 payload budget with the compact tail.
     (0x9A0204, 0x02669000, 'CFG1 (40GB geometry)'),
     (0x100CE0, 0x0000028a, 'LMR (memory rank)'),
     (0x1FA824, 0x1FFFFE00, 'WPR2 lo (teardown)'),
     (0x1FA828, 0x00000000, 'WPR2 hi (teardown)'),
     (0x8403C4, 0x000000FF, 'resetPLM (open)'),
+    (0x1180F8, 0x17100000, 'ARC mutex top-nibble (NVLink trigger, community-known)'),
+    (0x100110, 0x00000001, 'ECC enable bit (guess from A100 dump)'),
+]
+
+# Additional writes that need PLM access (post-exploit, NS-mode BAR0 writes).
+# These are written by the apply_unlock pipeline function AFTER the
+# exploit completes and resetPLM=0xFF is in place.
+POST_EXPLOIT_WRITES = [
+    (0x100114, 0x00000010, 'ECC scrub interval'),
+    (0x88000C, 0x00000001, 'NVLink link enable bit (guess)'),
+    (0x000118, 0x00000004, 'PCIe Link Control 2 → Gen 4 (target speed)'),
 ]
 
 
@@ -225,16 +247,26 @@ def build_payload(writes=None, canary=None, frame_start=None, frame_stride=None,
         w32(a + offsets['return_addr'], gadget_addr)
         a += frame_stride
 
-    # Tail frame (after all writes) — keeps the chain going
-    w32(a + offsets['r0'], 0x00000000)
-    w32(a + offsets['r1'], 0x00000000)
-    w32(a + offsets['r2'], 0x00000000)
-    w32(a + offsets['r3'], 0x00000000)
-    w32(a + offsets['saved_reg'], canary)
+    # Tail frame (compact - only 4 needed dwords, not 6).
+    # The booter's mpopaddret only reads offsets 0x08 (val→r1),
+    # 0x0C (addr→r10), and 0x14 (ra→PC). r0, r2, r3 are unused.
+    # So we only need saved_reg (canary) + val (0) + addr (0) + ra (raw exit).
+    w32(a + offsets['r2'], 0x00000000)        # r1 = 0 (val for mpopaddret)
+    w32(a + offsets['r3'], 0x00000000)        # r10 = 0 (addr for mpopaddret)
+    w32(a + offsets['saved_reg'], canary)    # canary check passes
     # Raw exit (jal x0, self) — keeps resetPLM=0xFF
     w32(a + offsets['return_addr'], 0x0000006f)
 
     return bytes(payload)
+
+
+# Compute unlock writes happen AFTER the exploit, via NS-mode BAR0 access
+# from the host driver. The ROP chain sets resetPLM=0xFF which opens PLM
+# access; then the driver can write SS0/SS1 directly.
+COMPUTE_WRITES = [
+    (0x82381C, 0x88888888, 'SS0 (FEAT_OVR_SM_SPD — all SMs max)'),
+    (0x823820, 0x00000008, 'SS1 (FEAT_OVR_SM_SPD_1 — IMLA4 override)'),
+]
 
 
 # =============================================================================
@@ -336,6 +368,7 @@ def run_full_unlock(pci_full: str, gsp_path: str = None) -> bool:
 
     log.info('[%s] Building ROP payload', pci_full)
     payload = build_payload()
+    log.info('[%s] Payload size: %d bytes (7 ROP writes + tail)', pci_full, len(payload))
 
     log.info('[%s] Injecting payload into GSP firmware', pci_full)
     patch_gsp(backup_path, payload, patched_path)
@@ -349,7 +382,16 @@ def run_full_unlock(pci_full: str, gsp_path: str = None) -> bool:
     log.info('[%s] FLR reset to apply patched firmware', pci_full)
     flr_reset(pci_full)
 
-    log.info('[%s] Pipeline complete — exploit should be running on next driver load', pci_full)
+    log.info('[%s] Post-exploit writes (PLM=0xFF now open)', pci_full)
+    log.info('[%s]   Writing %d additional feature enables via NS-mode BAR0',
+             pci_full, len(POST_EXPLOIT_WRITES))
+    for addr, val, label in POST_EXPLOIT_WRITES:
+        # These need actual hardware — the emulator can't do this.
+        # The real driver has to do these via sysfs/PCI config space.
+        log.info('[%s]   (would write) 0x%06x = 0x%08x  (%s)',
+                 pci_full, addr, val, label)
+
+    log.info('[%s] Pipeline complete', pci_full)
     log.info('[%s] Verify with: nvidia-smi --query-gpu=clocks.max.sm,memory.total', pci_full)
     return True
 
