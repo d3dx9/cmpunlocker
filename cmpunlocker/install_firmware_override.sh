@@ -53,20 +53,31 @@ for PATCHED in $PATCHED_PATHS; do
     RELATIVE="${PATCHED#/lib/firmware/nvidia/}"
     TARGET="$OVERRIDE_BASE/nvidia/$RELATIVE"
     mkdir -p "$(dirname "$TARGET")"
-    cp "$PATCHED" "$TARGET"
+    # Strip the .cmpunlocker.patched suffix to get the final filename
+    FINAL_NAME="$(basename "$PATCHED" .cmpunlocker.patched)"
+    TARGET_FINAL="$OVERRIDE_BASE/nvidia/$(dirname "${RELATIVE}")/$FINAL_NAME"
+    cp "$PATCHED" "$TARGET_FINAL"
     log "  Copied: $PATCHED"
-    log "       -> $TARGET"
+    log "       -> $TARGET_FINAL"
 done
 
 # Write a udev rule that bind-mounts at NVIDIA load time
-UDEV_RULE="/etc/udev/rules.d/99-cmpunlocker-firmware.rules"
-cat > "$UDEV_RULE" << EOF
+UDEV_DIR="/etc/udev/rules.d"
+if [ ! -d "$UDEV_DIR" ]; then
+    log "WARN: $UDEV_DIR does not exist (no udev), skipping rule install"
+    log "      The bind helper script will still be installed and we will"
+    log "      run it manually right now to apply the override."
+    UDEV_RULE=""
+else
+    UDEV_RULE="$UDEV_DIR/99-cmpunlocker-firmware.rules"
+    cat > "$UDEV_RULE" << EOF
 # cmpunlocker firmware override
 # Bind-mounts our patched firmware over the system firmware directory
 # at NVIDIA GPU detection time.
 ACTION=="add", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", RUN+="/usr/local/bin/cmpunlocker-bind-mount"
 EOF
-log "Wrote udev rule: $UDEV_RULE"
+    log "Wrote udev rule: $UDEV_RULE"
+fi
 
 # Write the bind-mount helper
 BIND_HELPER="/usr/local/bin/cmpunlocker-bind-mount"
