@@ -53,10 +53,36 @@ log = logging.getLogger('deploy')
 # All are implemented as mpopaddret+sw pairs in the ROP chain. Order
 # matters because the booter's mpopaddret pops in sequence.
 # =============================================================================
+
+# Available CFG1 values (verified from A100 32GB and 80GB VBIOS strap_info tables):
+#   0x02449000 = 10GB native (5 × 2GB HBM2)        [CMP 170HX default]
+#   0x02700000 = 32GB unlock (4 × 8GB HBM2e)         [from 32GB VBIOS analysis]
+#   0x02669000 = 40GB unlock (5 × 8GB HBM2e)         [community-verified]
+#   0x02770000 = hypothesized 64GB (4 × 16GB HBM2e) [no direct VBIOS evidence yet]
+#   0x02779000 = 80GB unlock (5 × 16GB HBM2e)        [from 80GB VBIOS analysis]
+#
+# CFG1 register bit layout (from VBIOS analysis):
+#   bits[31:24] = 0x02  (boot flag, always set in strap_info entries)
+#   bits[23:16] = strap byte (0x44=2GB HBM2, 0x55=4GB HBM2, 0x66=8GB HBM2e, 0x70=8GB HBM2e, 0x77=16GB HBM2e)
+#   bits[15:8]  = stack count feature (0x00=4 stacks, 0x90=5 stacks)
+#   bits[7:0]   = 0x00 (reserved)
+#
+# Memory type note: Modern A100s (40GB+, SXM4-80GB) use HBM2e. Older
+# pre-2022 A100s (40GB SXM4) used HBM2 (different strap byte 0x66
+# means different things). On CMP 170HX with 10GB HBM2, switching to
+# 0x66 HBM2e mode at 8GB/stack gives 40GB of HBM2e.
+ALL_CFG1_VALUES = {
+    'nativ_10gb':    0x02449000,
+    'unlocked_32gb':  0x02700000,  # 4 × 8GB HBM2e
+    'unlocked_40gb':  0x02669000,  # 5 × 8GB HBM2e (modern A100)
+    'unlocked_64gb':  0x02770000,  # hypothesized: 4 × 16GB HBM2e
+    'unlocked_80gb':  0x02779000,  # 5 × 16GB HBM2e
+}
+
 UNLOCK_WRITES = [
     # ===== Core memory + PLM unlock (community-verified, in ROP) =====
     # These 7 writes fit in the 0xF800 payload budget with the compact tail.
-    (0x9A0204, 0x02669000, 'CFG1 (40GB geometry)'),
+    (0x9A0204, ALL_CFG1_VALUES['unlocked_40gb'], 'CFG1 (40GB geometry)'),
     (0x100CE0, 0x0000028a, 'LMR (memory rank)'),
     (0x1FA824, 0x1FFFFE00, 'WPR2 lo (teardown)'),
     (0x1FA828, 0x00000000, 'WPR2 hi (teardown)'),
@@ -74,10 +100,14 @@ POST_EXPLOIT_WRITES = [
     (0x000118, 0x00000004, 'PCIe Link Control 2 → Gen 4 (target speed)'),
 ]
 
+# Compute unlock writes happen AFTER the exploit, via NS-mode BAR0 access
+# from the host driver. The ROP chain sets resetPLM=0xFF which opens PLM
+# access; then the driver can write SS0/SS1 directly.
+COMPUTE_WRITES = [
+    (0x82381C, 0x88888888, 'SS0 (FEAT_OVR_SM_SPD — all SMs max)'),
+    (0x823820, 0x00000008, 'SS1 (FEAT_OVR_SM_SPD_1 — IMLA4 override)'),
+]
 
-# =============================================================================
-# Falcon memory layout (from GSP-RM / GSP-R0 reverse engineering)
-# =============================================================================
 DMEM_LAYOUT = {
     'dma_target':    0x0800,
     'payload_size':  0xF800,
@@ -197,7 +227,26 @@ def _sw(rs2, rs1, off):
 
 
 def build_payload(writes=None, canary=None, frame_start=None, frame_stride=None,
-                  guard_addr=None, gadget_addr=None):
+              guard_addr=None, gadget_addr=None, target='unlocked_40gb'):
+    """Build the full 0xF800-byte payload with ROP chain and frames.
+
+    Args:
+        writes: list of (addr, value, label) tuples
+        canary: sentinel value for stack canaries (default 0xFACEB13D)
+        frame_start: DMEM addr of first frame (default 0xFF48)
+        frame_stride: frame size in bytes (default 0x18)
+        guard_addr: stack canary addr (default 0x6340)
+        gadget_addr: bar0_master write gadget (default 0x10B9)
+        target: CFG1 target key (default 'unlocked_40gb'). If writes are None,
+                the function builds UNLOCK_WRITES with CFG1 from ALL_CFG1_VALUES.
+    """
+    if writes is None:
+        cfg1_value = ALL_CFG1_VALUES.get(target, ALL_CFG1_VALUES['unlocked_40gb'])
+        writes = []
+        for addr, value, label in UNLOCK_WRITES:
+            if addr == 0x9A0204:
+                value = cfg1_value
+            writes.append((addr, value, label))
     """Build the full 0xF800-byte payload with ROP chain and frames.
 
     Args:
@@ -348,14 +397,34 @@ def _find_gsp():
     return paths[0]
 
 
-def run_full_unlock(pci_full: str, gsp_path: str = None) -> bool:
+def run_full_unlock(pci_full: str, gsp_path: str = None,
+                     target: str = 'unlocked_40gb') -> bool:
+    """Run the complete unlock pipeline.
+
+    Args:
+        pci_full: PCI BDF string like '0000:01:00.0'
+        gsp_path: path to gsp_tu10x.bin (auto-detect if not given)
+        target: CFG1 target key, one of:
+            'nativ_10gb'    - don't unlock, just verify native state
+            'unlocked_32gb'  - 4 stacks × 8GB HBM2e
+            'unlocked_40gb'  - 5 stacks × 8GB HBM2 (default)
+            'unlocked_64gb'  - 4 stacks × 16GB HBM2e (hypothesized)
+            'unlocked_80gb'  - 5 stacks × 16GB HBM2e
+    """
     if gsp_path is None:
         gsp_path = _find_gsp()
 
     backup_path = gsp_path + '.cmpunlocker.bak'
     patched_path = gsp_path + '.cmpunlocker.patched'
 
+    if target not in ALL_CFG1_VALUES:
+        log.error('[%s] Unknown target: %s (valid: %s)',
+                  pci_full, target, list(ALL_CFG1_VALUES.keys()))
+        return False
+
     log.info('[%s] Starting full unlock pipeline', pci_full)
+    log.info('[%s] Target: %s → CFG1=0x%08X', pci_full, target,
+             ALL_CFG1_VALUES[target])
     log.info('[%s] GSP firmware: %s', pci_full, gsp_path)
 
     log.info('[%s] Stopping display manager and unloading modules', pci_full)
@@ -366,8 +435,8 @@ def run_full_unlock(pci_full: str, gsp_path: str = None) -> bool:
         shutil.copy2(gsp_path, backup_path)
         log.info('[%s] GSP backup written to %s', pci_full, backup_path)
 
-    log.info('[%s] Building ROP payload', pci_full)
-    payload = build_payload()
+    log.info('[%s] Building ROP payload for target %s', pci_full, target)
+    payload = build_payload(target=target)
     log.info('[%s] Payload size: %d bytes (7 ROP writes + tail)', pci_full, len(payload))
 
     log.info('[%s] Injecting payload into GSP firmware', pci_full)
