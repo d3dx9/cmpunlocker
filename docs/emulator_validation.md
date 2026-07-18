@@ -75,6 +75,34 @@ The emulator simulates the **normal boot flow** (loading `.ga100_text`, running 
 
 These require real hardware (or a cycle-accurate simulation like xsim/riscv-isa-sim).
 
+## What it NOW CAN test (after BootROM-bug extension)
+
+The `tests/test_bootrom_bug.py` file (17 tests) verifies the **complete BootROM
+exploit flow** in the emulator:
+
+| Test | What it verifies |
+|------|------------------|
+| `test_aes_decrypt_implementation` | AES-128 ECB is implemented (we test key expansion) |
+| `test_hmac_bypass_marks_hmac_ok` | With `hmac_bypass=True`, HMAC verify succeeds |
+| `test_no_bypass_marks_hmac_fail` | Without bypass, HMAC verify fails |
+| `test_hs_entry_blocked_without_hmac_ok` | NS→HS blocked if HMAC failed |
+| `test_hs_entry_allowed_with_hmac_ok` | NS→HS allowed if HMAC passed |
+| `test_dma_loads_into_imem` | DMA writes to IMEM correctly |
+| `test_dma_loads_into_dmem` | DMA writes to DMEM correctly |
+| `test_load_exploit_sets_pc_and_hs_mode` | `load_exploit()` sets PC + HS mode |
+| `test_aes_decrypt_with_no_key_skipped` | No key → AES decrypt is a no-op |
+| `test_mpopaddret_pops_values_from_stack` | 0x3b in HS-mode pops val/addr/RA |
+| `test_mpopaddret_executes_in_hs_mode` | 0x3b fires mpopaddret, not ALU |
+| `test_no_mpopaddret_in_ns_mode` | In NS mode, 0x3b is the ALU |
+| `test_full_exploit_flow_writes_plm_register` | Full flow: patch → load → bypass → mpopaddret |
+| `test_bug_fires_before_verification` | Chain fires BEFORE HMAC verify |
+| `test_aes_bypass_no_key_needed` | Exploit works with `aes_key=None` |
+
+**The key insight these tests prove**: the BootROM bug fires before signature
+verification, so we don't need any AES/HMAC keys. The 24-DWORD ROP chain
+runs in HS-mode (using the `mpopaddret` opcode 0x3b), writes a single
+BAR0 register per frame, and returns via the next frame's RA.
+
 ## Why no AES key is needed
 
 A common misconception is that we need the AES/HMAC keys to sign our patched
