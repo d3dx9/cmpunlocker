@@ -409,6 +409,24 @@ def _find_gsp():
     return paths[0]
 
 
+def _can_write_path(path: str) -> bool:
+    """Check if we can write to a file's directory and replace the file."""
+    p = Path(path)
+    try:
+        if not p.exists():
+            return os.access(p.parent, os.W_OK)
+        if not os.access(p, os.W_OK):
+            return False
+        try:
+            with open(p, 'r+b') as f:
+                pass
+        except (PermissionError, OSError):
+            return False
+        return True
+    except OSError:
+        return False
+
+
 def run_full_unlock(pci_full: str, gsp_path: str = None,
                      target: str = 'unlocked_40gb') -> bool:
     """Run the complete unlock pipeline.
@@ -453,6 +471,14 @@ def run_full_unlock(pci_full: str, gsp_path: str = None,
 
     log.info('[%s] Injecting payload into GSP firmware', pci_full)
     patch_gsp(backup_path, payload, patched_path)
+    if not _can_write_path(gsp_path):
+        log.warning('[%s] %s is read-only; leaving patched firmware at %s',
+                    pci_full, gsp_path, patched_path)
+        log.warning('[%s] Manually install with:', pci_full)
+        log.warning('[%s]   sudo cp %s %s', pci_full, patched_path, gsp_path)
+        log.warning('[%s] or remount /lib/firmware read-write:', pci_full)
+        log.warning('[%s]   sudo mount -o remount,rw /lib/firmware', pci_full)
+        return False
     shutil.copy2(patched_path, gsp_path)
     log.info('[%s] Patched firmware in place: %s', pci_full, gsp_path)
 
@@ -487,12 +513,14 @@ def main():
     p.add_argument('pci_bdf', nargs='?', default=None,
                    help='PCI BDF like 0000:01:00.0 (auto-detect if not given)')
     p.add_argument('--gsp', help='Path to gsp_tu10x.bin (auto-detect if not given)')
+    p.add_argument('--target', default='unlocked_40gb',
+                   help='CFG1 target key (default: unlocked_40gb)')
     p.add_argument('--dry-run', action='store_true',
                    help='Build payload + patch firmware, but do NOT copy to system location')
     args = p.parse_args()
 
     pci = args.pci_bdf
-    if pci is None:
+    if pci is None and not args.dry_run:
         # Try to auto-detect
         from payload.gpu import find_gpu
         try:
@@ -512,12 +540,12 @@ def main():
             patched = gsp + '.cmpunlocker.patched'
             if not os.path.exists(backup):
                 shutil.copy2(gsp, backup)
-            payload = build_payload()
+            payload = build_payload(target=args.target)
             patch_gsp(backup, payload, patched)
             log.info('Patched firmware written to: %s', patched)
             log.info('Not copied to system location (dry-run).')
             return 0
-        run_full_unlock(pci, args.gsp)
+        run_full_unlock(pci, args.gsp, target=args.target)
     except Exception as exc:
         log.error('Unlock failed: %s', exc)
         return 1
