@@ -1,33 +1,37 @@
-"""cmpunlocker.payload.gpu — GPU auto-detection helper.
-
-Finds the first compatible CMP 170HX (or A100) GPU on the system.
-"""
-
-import os
 import re
 import subprocess
 
-
-def find_gpu():
-    """Auto-detect the first CMP 170HX / A100 GPU."""
-    try:
-        out = subprocess.run(['lspci', '-nn'], capture_output=True,
-                              text=True, check=False).stdout
-    except FileNotFoundError:
-        return None
-
-    # CMP 170HX device IDs: 20b0, 20c2, 2082
-    # A100 device IDs: 20b0 (40GB), 20b2 (40GB), 20b4 (80GB), etc.
-    for line in out.splitlines():
-        m = re.search(r'^\S+\s+([0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f])\s+.*10de:20(?:b[024]|c[02]|82)\b', line)
-        if m:
-            return '0000:' + m.group(1)
-    return None
+from common.constants import get
 
 
-if __name__ == '__main__':
-    gpu = find_gpu()
-    if gpu is None:
-        print('ERROR: No compatible GPU found (10de:20b0/20b2/20b4/20c2/2082)')
-        exit(1)
-    print(gpu)
+def _device_id_set() -> set:
+    return {f"10de:{did}" for did in get('gpu.device_ids')}
+
+
+def find_all_gpus() -> list:
+    result = subprocess.run(
+        ["lspci", "-nn"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    ids = _device_id_set()
+    gpus = []
+    for line in result.stdout.splitlines():
+        if any(dev_id in line for dev_id in ids):
+            match = re.match(r"^(\S+)\s", line)
+            if match:
+                bdf = match.group(1)
+                if not bdf.startswith("0000:"):
+                    bdf = "0000:" + bdf
+                gpus.append(bdf)
+    return gpus
+
+
+def find_gpu() -> str:
+    gpus = find_all_gpus()
+    return gpus[0] if gpus else None
+
+
+def bar0_path(pci_full: str) -> str:
+    return f"/sys/bus/pci/devices/{pci_full}/resource0"

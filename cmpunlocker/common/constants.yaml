@@ -1,0 +1,97 @@
+dmem_layout:
+  dma_target:    0x0800
+  payload_size:  0xF800
+  guard_addr:    0x6340
+  canary:        0xFACEB13D
+  bar0_mmap_size: 0x1000000
+
+host_bar0_writes:
+  ss0:
+    addr:  0x0082381C
+    value: 0x88888888
+    note: "FEAT_OVR_SM_SPD (all SMs max speed)"
+  ss1:
+    addr:  0x00823820
+    value: 0x00000008
+    note: "FEAT_OVR_SM_SPD_1 (IMLA4 override)"
+  feat_ovr_plm:
+    addr:  0x00823804
+    value: 0xFFFFFFFF
+    note: "Feature override PLM (must be 0xFFFFFFFF for compute writes to stick)"
+
+memory_unlock:
+  cfg1:
+    addr:  0x009A0204
+    note: "HBM geometry broadcast register"
+  lmr:
+    addr:  0x00100CE0
+    note: "Link Memory Register"
+  targets:
+    nativ_10gb:
+      cfg1: 0x02449000
+      lmr:  0x0000020B
+      note: "5 stacks × 2GB HBM2 = 10GB (CMP 170HX native)"
+    unlocked_40gb:
+      cfg1: 0x02669000
+      lmr:  0x0000020B
+      note: "5 stacks × 8GB HBM2e = 40GB (safe target)"
+    unlocked_80gb:
+      cfg1: 0x02779000
+      lmr:  0x0000020B
+      note: "5 stacks × 16GB HBM2e = 80GB (full capacity, default)"
+  default_target: unlocked_80gb
+
+# PLM (Platform Lock Manager) registers - per modified 610.43.03 driver.
+# Each register is opened one at a time by refilling the ROP payload
+# and triggering kgspExecuteBooterLoad. After all 4 PLMs are open,
+# SS0/SS1/CFG1/LMR writes can proceed.
+plm_table:
+  - { addr: 0x001FA7CC, value: 0xFFFFf0ff, name: "WPR_CFG" }
+  - { addr: 0x009A0148, value: 0xFFFFFFFF, name: "FBPA"     }
+  - { addr: 0x001FA7C4, value: 0xFFFFFFFF, name: "WPR"      }
+  - { addr: 0x00823804, value: 0xFFFFFFFF, name: "FEAT"     }
+
+# 24-DWORD ROP payload (verified on GA100 silicon).
+# This is the payload that gets written into the .fwsignature_ga100
+# DMEM section. It performs a single BAR0 write at runtime.
+# Pattern from open-gpu-kernel-modules-610.43.03 kernel_gsp.c.
+rop_payload:
+  fill_dword:   0x000004a7
+  header:       0x00000007
+  canary:       0xc0deca7e
+  offsets:
+  fill_dword:   0x000004a7
+  header:       0x00000007
+  canary:       0xc0deca7e
+  offsets:
+    header:     0x1100
+    canary_1:   0x5b40
+    write_value: 0xf754
+    canary_2:   0xf758
+    gadget_1:   0xf75c
+    write_addr: 0xf76c
+    gadget_2:   0xf774
+    zero_1:     0xf780
+    gadget_3:   0xf788
+    gadget_4:   0xf78c
+    gadget_5:   0xf790
+    canary_3:   0xf794
+    gadget_6:   0xf798
+    zero_2:     0xf79c
+    canary_4:   0xf7a0
+    gadget_7:   0xf7a4
+    gadget_8:   0xf7b0
+    gadget_9:   0xf7b8
+    canary_5:   0xf7c4
+    gadget_10:  0xf7c8
+    gadget_11:  0xf7d8
+    gadget_12:  0xf7e0
+    gadget_13:  0xf7f4
+    gadget_14:  0xf7f8
+
+gpu:
+  device_ids: ["20b0", "20c2", "2082"]
+
+elf:
+  header_magic: 0x7F454C46
+  signature_section: ".fwsignature_ga100"
