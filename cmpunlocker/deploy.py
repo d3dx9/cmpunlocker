@@ -410,16 +410,28 @@ def _find_gsp():
 
 
 def _can_write_path(path: str) -> bool:
-    """Check if we can write to a file's directory and replace the file."""
+    """Check if we can write to a file's directory and replace the file.
+
+    Note: a file with mode 0444 owned by root CAN be replaced by root
+    if the parent directory is writable — root can unlink and recreate
+    the file. We check the parent directory's write permission, not
+    the file's mode, because cp/rm+create is the standard replacement
+    mechanism.
+    """
     p = Path(path)
     try:
         if not p.exists():
             return os.access(p.parent, os.W_OK)
-        if not os.access(p, os.W_OK):
-            return False
+        # If parent is writable, we can rm + create
+        if os.access(p.parent, os.W_OK):
+            return True
+        # If the file itself is writable (unusual), we can overwrite in place
+        if os.access(p, os.W_OK):
+            return True
         try:
             with open(p, 'r+b') as f:
                 pass
+            return True
         except (PermissionError, OSError):
             return False
         return True
